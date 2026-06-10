@@ -21,7 +21,7 @@ analyzer = MatchAnalyzer()
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "👋 *HLTV Match Predictor Bot*\n\n"
-        "Я анализирую статистику с HLTV.org и предсказываю исходы матчей CS2.\n\n"
+        "Анализирую реальную статистику CS2 с HLTV.org и предсказываю исходы матчей.\n\n"
         "📋 *Команды:*\n"
         "/today — матчи на сегодня\n"
         "/top — топ-10 команд по рейтингу\n"
@@ -34,62 +34,70 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "🤖 *Как пользоваться ботом:*\n\n"
-        "1️⃣ Введи /today — увидишь матчи на сегодня\n"
+        "1️⃣ Введи /today — увидишь матчи\n"
         "2️⃣ Нажми на кнопку матча — получишь анализ\n"
-        "3️⃣ Бот покажет шансы каждой команды на победу\n\n"
-        "📊 *Что анализируется:*\n"
-        "• Текущий рейтинг HLTV\n"
-        "• Winrate за последние 3 месяца\n"
-        "• Форма команды (последние 10 матчей)\n"
-        "• Результаты личных встреч (H2H)\n"
-        "• Средний рейтинг игроков (Rating 2.0)\n"
-        "• Разница в опыте и уровне турнира\n\n"
-        "⚠️ *Дисклеймер:* Прогнозы носят развлекательный характер и не являются ставочными советами."
+        "3️⃣ Бот покажет реальные шансы на победу\n\n"
+        "📊 *Что анализируется (реальные данные HLTV):*\n"
+        "• Рейтинг HLTV (40%)\n"
+        "• Winrate за последние матчи (35%)\n"
+        "• Средний K/D команды (15%)\n"
+        "• Форма — последние 5 результатов (10%)\n\n"
+        "⚠️ *Дисклеймер:* Прогнозы для развлечения, не ставочные советы."
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def today_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("⏳ Загружаю матчи с HLTV...")
+    msg = await update.message.reply_text("⏳ Загружаю матчи с HLTV.org...")
 
     try:
         matches = await parser.get_today_matches()
 
         if not matches:
             await msg.edit_text(
-                "😔 Сегодня матчей не найдено или HLTV недоступен.\n\n"
-                "Попробуй позже или проверь hltv.org вручную."
+                "😔 *Матчей не найдено*\n\n"
+                "Возможные причины:\n"
+                "• Сегодня нет запланированных матчей\n"
+                "• HLTV временно недоступен\n\n"
+                "Попробуй через несколько минут.",
+                parse_mode="Markdown"
             )
             return
 
-        text = f"📅 *Матчи CS2 на сегодня* ({len(matches)} шт.)\n\n"
-
-        keyboard = []
-        for i, match in enumerate(matches):
-            team1 = match["team1"]
-            team2 = match["team2"]
-            event = match.get("event", "Unknown Event")
-            time_str = match.get("time", "TBD")
-            stars = "⭐" * match.get("stars", 0)
-
-            label = f"{team1} vs {team2}"
-            if len(label) > 30:
-                label = f"{team1[:12]} vs {team2[:12]}"
-
-            button_text = f"{stars} {time_str} | {label}"
-            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"match_{i}")])
-
+        # Обогащаем матчи рангами из топ-30
+        matches = await parser.inject_ranks(matches)
         context.user_data["matches"] = matches
 
+        text = f"📅 *Матчи CS2* — найдено {len(matches)}\n\n"
+        keyboard = []
+
+        for i, m in enumerate(matches):
+            stars = "⭐" * min(m.get("stars", 0), 5)
+            time_str = m.get("time", "TBD")
+            t1 = m["team1"][:13]
+            t2 = m["team2"][:13]
+            live_icon = "🔴 " if m.get("live") else ""
+            r1 = m.get("team1_rank")
+            r2 = m.get("team2_rank")
+            rank_str = f" (#{r1} vs #{r2})" if r1 and r2 else ""
+
+            btn = f"{live_icon}{stars} {time_str} | {t1} vs {t2}{rank_str}"
+            keyboard.append([InlineKeyboardButton(btn, callback_data=f"match_{i}")])
+
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await msg.edit_text(text + "👇 Нажми на матч для анализа:", parse_mode="Markdown", reply_markup=reply_markup)
+        await msg.edit_text(
+            text + "👇 Нажми на матч для анализа:",
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
 
     except Exception as e:
-        logger.error(f"Error fetching matches: {e}")
+        logger.error(f"Ошибка today_matches: {e}", exc_info=True)
         await msg.edit_text(
-            "❌ Ошибка при загрузке матчей.\n\n"
-            "HLTV иногда блокирует запросы. Попробуй через несколько минут.\n"
-            "Также проверь, что установлены все зависимости (см. README)."
+            "❌ *Ошибка загрузки матчей*\n\n"
+            "HLTV временно недоступен или блокирует запросы.\n"
+            "Попробуй через 1–2 минуты.",
+            parse_mode="Markdown"
         )
 
 
@@ -101,95 +109,100 @@ async def analyze_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
     matches = context.user_data.get("matches", [])
 
     if match_idx >= len(matches):
-        await query.edit_message_text("❌ Матч не найден. Обнови список командой /today")
+        await query.edit_message_text("❌ Матч не найден. Обнови список: /today")
         return
 
     match = matches[match_idx]
-    team1 = match["team1"]
-    team2 = match["team2"]
+    t1_name = match["team1"]
+    t2_name = match["team2"]
 
-    await query.edit_message_text(f"🔍 Анализирую матч *{team1}* vs *{team2}*...", parse_mode="Markdown")
+    await query.edit_message_text(
+        f"🔍 Загружаю статистику *{t1_name}* и *{t2_name}* с HLTV...\n"
+        f"_(это может занять 10–20 секунд)_",
+        parse_mode="Markdown"
+    )
 
     try:
         analysis = await analyzer.analyze(match)
-        text = format_analysis(analysis)
-
+        text = _format_analysis(analysis)
         keyboard = [[InlineKeyboardButton("◀️ Назад к матчам", callback_data="back_to_matches")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=reply_markup)
-
-    except Exception as e:
-        logger.error(f"Error analyzing match: {e}")
         await query.edit_message_text(
-            f"❌ Не удалось загрузить статистику для матча *{team1}* vs *{team2}*.\n\n"
-            "Попробуй позже.",
+            text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception as e:
+        logger.error(f"Ошибка analyze_match: {e}", exc_info=True)
+        await query.edit_message_text(
+            f"❌ Не удалось загрузить статистику для *{t1_name}* vs *{t2_name}*.\n"
+            "Попробуй чуть позже.",
             parse_mode="Markdown"
         )
 
 
-def format_analysis(analysis: dict) -> str:
+def _format_analysis(analysis: dict) -> str:
     t1 = analysis["team1"]
     t2 = analysis["team2"]
     pred = analysis["prediction"]
 
-    winner = t1["name"] if pred["team1_win_chance"] >= 50 else t2["name"]
-    confidence = max(pred["team1_win_chance"], pred["team2_win_chance"])
+    p1 = pred["team1_win_chance"]
+    p2 = pred["team2_win_chance"]
+    winner = t1["name"] if p1 >= p2 else t2["name"]
+    confidence = max(p1, p2)
 
     if confidence >= 70:
         conf_label = "🔥 Высокая уверенность"
     elif confidence >= 60:
         conf_label = "✅ Средняя уверенность"
     else:
-        conf_label = "⚖️ Неопределённость"
+        conf_label = "⚖️ Примерно равные шансы"
 
-    bar1 = make_bar(pred["team1_win_chance"])
-    bar2 = make_bar(pred["team2_win_chance"])
+    def bar(p):
+        filled = round(p / 10)
+        return "█" * filled + "░" * (10 - filled)
+
+    def rank_str(r):
+        return f"#{r}" if r else "N/A"
+
+    def wr_str(w):
+        return f"{w:.0f}%" if w is not None else "N/A"
+
+    def kd_str(k):
+        return f"{k:.2f}" if k is not None else "N/A"
+
+    def form_str(f):
+        return f if f else "?????"
 
     text = (
         f"🎮 *{t1['name']}* vs *{t2['name']}*\n"
-        f"🏆 *{analysis.get('event', 'Unknown Event')}*\n"
-        f"{'—' * 28}\n\n"
+        f"🏆 _{analysis.get('event', 'Unknown Event')}_\n"
+        f"{'—'*28}\n\n"
         f"📊 *Шансы на победу:*\n"
-        f"`{bar1}` {t1['name']}: *{pred['team1_win_chance']:.0f}%*\n"
-        f"`{bar2}` {t2['name']}: *{pred['team2_win_chance']:.0f}%*\n\n"
-        f"🎯 *Прогноз: {winner}* — {conf_label}\n\n"
-        f"{'—' * 28}\n"
-        f"📈 *Статистика команд:*\n\n"
+        f"`{bar(p1)}` *{t1['name']}*: *{p1:.0f}%*\n"
+        f"`{bar(p2)}` *{t2['name']}*: *{p2:.0f}%*\n\n"
+        f"🎯 Прогноз: *{winner}* — {conf_label}\n\n"
+        f"{'—'*28}\n"
+        f"📈 *Статистика (реальные данные HLTV):*\n\n"
         f"*{t1['name']}*\n"
-        f"  📍 Рейтинг HLTV: #{t1.get('rank', 'N/A')}\n"
-        f"  🏅 Winrate (3 мес): {t1.get('winrate', 'N/A')}%\n"
-        f"  🔥 Форма: {t1.get('form', 'N/A')}\n"
-        f"  ⭐ Avg Rating 2.0: {t1.get('avg_rating', 'N/A')}\n\n"
+        f"  📍 Рейтинг: {rank_str(t1.get('rank'))}\n"
+        f"  🏅 Winrate: {wr_str(t1.get('winrate'))}\n"
+        f"  ⚡ K/D: {kd_str(t1.get('avg_rating'))}\n"
+        f"  🔥 Форма: `{form_str(t1.get('form'))}`\n\n"
         f"*{t2['name']}*\n"
-        f"  📍 Рейтинг HLTV: #{t2.get('rank', 'N/A')}\n"
-        f"  🏅 Winrate (3 мес): {t2.get('winrate', 'N/A')}%\n"
-        f"  🔥 Форма: {t2.get('form', 'N/A')}\n"
-        f"  ⭐ Avg Rating 2.0: {t2.get('avg_rating', 'N/A')}\n\n"
+        f"  📍 Рейтинг: {rank_str(t2.get('rank'))}\n"
+        f"  🏅 Winrate: {wr_str(t2.get('winrate'))}\n"
+        f"  ⚡ K/D: {kd_str(t2.get('avg_rating'))}\n"
+        f"  🔥 Форма: `{form_str(t2.get('form'))}`\n"
     )
-
-    h2h = analysis.get("h2h")
-    if h2h:
-        text += (
-            f"{'—' * 28}\n"
-            f"🤝 *H2H (последние встречи):*\n"
-            f"  {t1['name']}: {h2h.get('team1_wins', 0)} побед\n"
-            f"  {t2['name']}: {h2h.get('team2_wins', 0)} побед\n\n"
-        )
 
     factors = pred.get("key_factors", [])
     if factors:
-        text += f"{'—' * 28}\n🔑 *Ключевые факторы:*\n"
+        text += f"\n{'—'*28}\n🔑 *Ключевые факторы:*\n"
         for f in factors:
-            text += f"  • {f}\n"
+            text += f"  {f}\n"
 
     text += "\n⚠️ _Прогноз для развлечения. Не является ставочным советом._"
     return text
-
-
-def make_bar(percent: float, length: int = 10) -> str:
-    filled = round(percent / 100 * length)
-    return "█" * filled + "░" * (length - filled)
 
 
 async def back_to_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -198,48 +211,58 @@ async def back_to_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
     matches = context.user_data.get("matches", [])
 
     if not matches:
-        await query.edit_message_text("Список матчей устарел. Введи /today")
+        await query.edit_message_text("Список устарел. Введи /today")
         return
 
     keyboard = []
-    for i, match in enumerate(matches):
-        team1 = match["team1"]
-        team2 = match["team2"]
-        time_str = match.get("time", "TBD")
-        stars = "⭐" * match.get("stars", 0)
-        label = f"{team1[:12]} vs {team2[:12]}"
-        keyboard.append([InlineKeyboardButton(f"{stars} {time_str} | {label}", callback_data=f"match_{i}")])
+    for i, m in enumerate(matches):
+        stars = "⭐" * min(m.get("stars", 0), 5)
+        time_str = m.get("time", "TBD")
+        t1 = m["team1"][:13]
+        t2 = m["team2"][:13]
+        live_icon = "🔴 " if m.get("live") else ""
+        r1 = m.get("team1_rank")
+        r2 = m.get("team2_rank")
+        rank_str = f" (#{r1} vs #{r2})" if r1 and r2 else ""
+        btn = f"{live_icon}{stars} {time_str} | {t1} vs {t2}{rank_str}"
+        keyboard.append([InlineKeyboardButton(btn, callback_data=f"match_{i}")])
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(
-        f"📅 *Матчи CS2 на сегодня* ({len(matches)} шт.)\n\n👇 Нажми на матч для анализа:",
+        f"📅 *Матчи CS2* — {len(matches)} шт.\n\n👇 Нажми на матч для анализа:",
         parse_mode="Markdown",
-        reply_markup=reply_markup
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
 async def top_teams(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("⏳ Загружаю рейтинг команд...")
+    msg = await update.message.reply_text("⏳ Загружаю рейтинг с HLTV...")
     try:
-        teams = await parser.get_top_teams(limit=10)
+        teams = await parser.get_top_teams(10)
+        if not teams:
+            await msg.edit_text("❌ Не удалось загрузить рейтинг. Попробуй позже.")
+            return
+
         text = "🏆 *Топ-10 команд HLTV прямо сейчас:*\n\n"
         medals = ["🥇", "🥈", "🥉"] + ["🔹"] * 7
         for i, team in enumerate(teams):
-            text += f"{medals[i]} *#{i+1}* {team['name']} — {team.get('points', '?')} pts\n"
+            pts = team.get("points", "N/A")
+            text += f"{medals[i]} *#{i+1}* {team['name']}"
+            if pts and pts != "N/A":
+                text += f" — {pts} pts"
+            text += "\n"
+
         await msg.edit_text(text, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Error fetching top teams: {e}")
+        logger.error(f"Ошибка top_teams: {e}")
         await msg.edit_text("❌ Не удалось загрузить рейтинг. Попробуй позже.")
 
 
 def main():
     if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("❌ Укажи токен бота в переменной BOT_TOKEN!")
-        print("   export BOT_TOKEN='your_token_here'")
+        print("❌ Укажи токен: export BOT_TOKEN='your_token'")
         return
 
     app = Application.builder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("today", today_matches))
@@ -247,7 +270,7 @@ def main():
     app.add_handler(CallbackQueryHandler(analyze_match, pattern=r"^match_\d+$"))
     app.add_handler(CallbackQueryHandler(back_to_matches, pattern="^back_to_matches$"))
 
-    print("🤖 Бот запущен! Нажми Ctrl+C для остановки.")
+    print("🤖 Бот запущен!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
