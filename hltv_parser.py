@@ -7,50 +7,79 @@ logger = logging.getLogger(__name__)
 
 class HLTVParser:
     def __init__(self):
-        # min_delay/max_delay — задержка между запросами чтобы не получить бан
+        # min_delay/max_delay — пауза между запросами чтобы не получить бан
         self.hltv = Hltv(min_delay=2, max_delay=8, max_retries=5)
 
     async def get_today_matches(self) -> list[dict]:
-        """Получить матчи на сегодня через hltv-async-api."""
+        """Матчи на ближайшие 1-2 дня через get_upcoming_matches."""
         try:
-            # get_matches возвращает список ближайших матчей
-            raw = await self.hltv.get_matches()
+            # days=2, min_star_rating=0 — берём все матчи включая малозвёздные
+            raw = await self.hltv.get_upcoming_matches(days=2, min_star_rating=0)
             if not raw:
-                logger.warning("hltv.get_matches() вернул пустой список")
+                logger.warning("get_upcoming_matches вернул пустой список")
                 return []
 
             matches = []
-            for m in raw:
-                try:
-                    team1 = m.get("team1") or "TBD"
-                    team2 = m.get("team2") or "TBD"
+            for day_block in raw:
+                # Формат: {'date': '10-6', 'matches': [...]}
+                day_matches = day_block.get("matches", [])
+                for m in day_matches:
+                    try:
+                        team1 = m.get("team1") or "TBD"
+                        team2 = m.get("team2") or "TBD"
+                        if team1 == "TBD" or team2 == "TBD":
+                            continue
 
-                    # Пропускаем матчи без команд
-                    if team1 == "TBD" or team2 == "TBD":
+                        matches.append({
+                            "team1": team1,
+                            "team2": team2,
+                            "team1_id": m.get("team1_id"),
+                            "team2_id": m.get("team2_id"),
+                            "match_id": m.get("id"),
+                            "event": m.get("event") or "Unknown Event",
+                            "time": m.get("time", "TBD"),
+                            "stars": int(m.get("stars", 0) or 0),
+                            "maps": m.get("maps", ""),
+                            "live": False,
+                        })
+                    except Exception as e:
+                        logger.debug(f"Ошибка разбора матча: {e}")
                         continue
 
-                    matches.append({
-                        "team1": team1,
-                        "team2": team2,
-                        "team1_id": m.get("team1_id"),
-                        "team2_id": m.get("team2_id"),
-                        "event": m.get("event", "Unknown Event"),
-                        "time": m.get("time", "TBD"),
-                        "stars": m.get("stars", 0),
-                        "match_id": m.get("id"),
-                        "live": m.get("live", False),
-                    })
-                except Exception as e:
-                    logger.debug(f"Ошибка разбора матча: {e}")
-                    continue
+            # Также добавляем live-матчи
+            try:
+                live_raw = await self.hltv.get_live_matches()
+                for m in (live_raw or []):
+                    try:
+                        team1 = m.get("team1") or "TBD"
+                        team2 = m.get("team2") or "TBD"
+                        if team1 == "TBD" or team2 == "TBD":
+                            continue
+                        matches.insert(0, {
+                            "team1": team1,
+                            "team2": team2,
+                            "team1_id": m.get("team1_id"),
+                            "team2_id": m.get("team2_id"),
+                            "match_id": m.get("id"),
+                            "event": m.get("event") or "Live Match",
+                            "time": "LIVE",
+                            "stars": int(m.get("stars", 0) or 0),
+                            "maps": m.get("maps", ""),
+                            "live": True,
+                        })
+                    except Exception:
+                        continue
+            except Exception as e:
+                logger.warning(f"get_live_matches ошибка: {e}")
 
             return matches
+
         except Exception as e:
-            logger.error(f"Ошибка get_today_matches: {e}")
+            logger.error(f"Ошибка get_today_matches: {e}", exc_info=True)
             return []
 
     async def get_team_stats(self, team_id: int | None, team_name: str) -> dict:
-        """Получить статистику команды по ID."""
+        """Статистика команды: рейтинг, winrate, K/D, форма."""
         base = {
             "name": team_name,
             "rank": None,
@@ -65,22 +94,23 @@ class HLTVParser:
             return base
 
         try:
-            info = await self.hltv.get_team_info(team_id, team_name)
+            # get_team_info(team_id, team_name) → dict со stats и matches
+            info = await self.hltv.get_team_info(int(team_id), team_name)
             if not info:
                 base["_estimated"] = True
                 return base
 
-            # Парсим статистику из ответа
             stats = info.get("stats", {})
 
-            # K/D → приближение к рейтингу
-            kd_str = stats.get("K/D Ratio", "")
-            try:
-                base["avg_rating"] = float(kd_str)
-            except (ValueError, TypeError):
-                pass
+            # K/D Ratio
+            kd = stats.get("K/D Ratio")
+            if kd:
+                try:
+                    base["avg_rating"] = float(kd)
+                except ValueError:
+                    pass
 
-            # Wins/draws/losses → winrate
+            # Wins / draws / losses → winrate
             wdl = stats.get("Wins / draws / losses", "")
             if wdl:
                 try:
@@ -93,7 +123,7 @@ class HLTVParser:
                 except Exception:
                     pass
 
-            # Последние матчи → форма
+            # Форма из последних матчей
             recent = info.get("matches", [])
             if recent:
                 base["form"] = self._build_form(recent, team_name)
@@ -101,65 +131,72 @@ class HLTVParser:
             return base
 
         except Exception as e:
-            logger.error(f"Ошибка get_team_stats для {team_name}: {e}")
+            logger.error(f"get_team_stats ошибка для {team_name}({team_id}): {e}")
             base["_estimated"] = True
             return base
 
-    async def get_top_teams(self, limit: int = 10) -> list[dict]:
-        """Топ команд по рейтингу HLTV."""
-        try:
-            raw = await self.hltv.get_top_teams(limit)
-            teams = []
-            for i, t in enumerate(raw or []):
-                teams.append({
-                    "name": t.get("team_name") or t.get("name", f"Team {i+1}"),
-                    "rank": t.get("team_rank") or (i + 1),
-                    "points": t.get("points", "N/A"),
-                    "id": t.get("team_id"),
-                })
-            return teams
-        except Exception as e:
-            logger.error(f"Ошибка get_top_teams: {e}")
-            return []
-
     async def inject_ranks(self, matches: list[dict]) -> list[dict]:
-        """Добавляет актуальный ранг HLTV к каждой команде в списке матчей."""
+        """Добавляет HLTV-ранг в каждый матч из топ-30."""
         try:
             top = await self.hltv.get_top_teams(30)
-            rank_map = {}
-            for t in (top or []):
-                name = (t.get("team_name") or t.get("name", "")).lower()
-                rank = t.get("team_rank") or 0
-                tid = t.get("team_id")
-                if name:
-                    rank_map[name] = {"rank": rank, "id": tid}
+            # Формат: [(rank, id, name, ...)] или [{'rank':..,'name':..}]
+            rank_map: dict[str, dict] = {}
+            for entry in (top or []):
+                if isinstance(entry, (list, tuple)):
+                    # старый формат: (rank, id, name)
+                    if len(entry) >= 3:
+                        rank_map[str(entry[2]).lower()] = {"rank": entry[0], "id": entry[1]}
+                elif isinstance(entry, dict):
+                    name = (entry.get("team_name") or entry.get("name") or "").lower()
+                    rank = entry.get("team_rank") or entry.get("rank")
+                    tid = entry.get("team_id") or entry.get("id")
+                    if name:
+                        rank_map[name] = {"rank": rank, "id": tid}
 
             for m in matches:
                 for key in ("team1", "team2"):
-                    name_lower = m[key].lower()
-                    if name_lower in rank_map:
-                        m[f"{key}_rank"] = rank_map[name_lower]["rank"]
+                    nl = m[key].lower()
+                    if nl in rank_map:
+                        m[f"{key}_rank"] = rank_map[nl]["rank"]
                         if not m.get(f"{key}_id"):
-                            m[f"{key}_id"] = rank_map[name_lower]["id"]
+                            m[f"{key}_id"] = rank_map[nl]["id"]
         except Exception as e:
             logger.warning(f"inject_ranks ошибка: {e}")
         return matches
 
+    async def get_top_teams(self, limit: int = 10) -> list[dict]:
+        try:
+            raw = await self.hltv.get_top_teams(limit)
+            teams = []
+            for i, entry in enumerate(raw or []):
+                if isinstance(entry, (list, tuple)) and len(entry) >= 3:
+                    teams.append({"rank": entry[0], "name": entry[2], "points": None, "id": entry[1]})
+                elif isinstance(entry, dict):
+                    teams.append({
+                        "rank": entry.get("team_rank") or entry.get("rank") or (i + 1),
+                        "name": entry.get("team_name") or entry.get("name", f"#{i+1}"),
+                        "points": entry.get("points"),
+                        "id": entry.get("team_id") or entry.get("id"),
+                    })
+            return teams[:limit]
+        except Exception as e:
+            logger.error(f"get_top_teams ошибка: {e}")
+            return []
+
     def _build_form(self, recent_matches: list, team_name: str) -> str:
-        """Строит строку формы из последних матчей."""
         form = ""
         name_lower = team_name.lower()
         for m in recent_matches[:5]:
             try:
-                teams = m.get("teams", {})
-                t1 = (teams.get("team_1") or "").lower()
-                t2 = (teams.get("team_2") or "").lower()
-                winner = (m.get("winner") or "").lower()
-                if not winner:
+                t1 = str(m.get("team1") or "").lower()
+                t2 = str(m.get("team2") or "").lower()
+                s1 = int(m.get("score1", 0) or 0)
+                s2 = int(m.get("score2", 0) or 0)
+                if s1 == 0 and s2 == 0:
                     form += "?"
                     continue
-                is_t1 = name_lower in t1
-                won = name_lower in winner
+                is_team1 = name_lower in t1
+                won = (is_team1 and s1 > s2) or (not is_team1 and s2 > s1)
                 form += "W" if won else "L"
             except Exception:
                 form += "?"
