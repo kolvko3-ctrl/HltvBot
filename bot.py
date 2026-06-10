@@ -12,96 +12,89 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+PANDASCORE_TOKEN = os.getenv("PANDASCORE_TOKEN", "")
 
-# НЕ создаём никаких объектов на уровне модуля — только после запуска event loop
-_parser: HLTVParser | None = None
-_analyzer: MatchAnalyzer | None = None
-
-
-def get_parser() -> HLTVParser:
-    global _parser
-    if _parser is None:
-        _parser = HLTVParser()
-    return _parser
-
-
-def get_analyzer() -> MatchAnalyzer:
-    global _analyzer
-    if _analyzer is None:
-        _analyzer = MatchAnalyzer()
-    return _analyzer
+# Создаём объекты только внутри функций — не на уровне модуля!
+def make_services():
+    parser = HLTVParser(token=PANDASCORE_TOKEN)
+    analyzer = MatchAnalyzer(parser=parser)
+    return parser, analyzer
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
+    await update.message.reply_text(
         "👋 *HLTV Match Predictor Bot*\n\n"
-        "Анализирую реальную статистику CS2 с HLTV.org.\n\n"
+        "Использую официальный PandaScore API для реальной статистики CS2.\n\n"
         "📋 *Команды:*\n"
         "/today — матчи на сегодня/завтра\n"
-        "/top — топ-10 команд\n"
-        "/help — помощь\n\n"
-        "Выбери матч → получи анализ шансов 🎯"
+        "/top — топ команды\n"
+        "/help — помощь",
+        parse_mode="Markdown"
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
+    await update.message.reply_text(
         "🤖 *Как пользоваться:*\n\n"
         "1. /today — список матчей\n"
-        "2. Нажми кнопку матча — получишь прогноз\n\n"
-        "📊 *Анализируется (данные HLTV):*\n"
-        "• Рейтинг HLTV — 40%\n"
-        "• Winrate — 35%\n"
-        "• K/D / Rating — 15%\n"
-        "• Форма (посл. 5 матчей) — 10%\n\n"
-        "⚠️ Только для развлечения, не для ставок."
+        "2. Нажми на матч — получишь анализ\n\n"
+        "📊 *Анализ основан на:*\n"
+        "• Winrate последних 10 матчей — 60%\n"
+        "• Форма (посл. 5 результатов) — 40%\n\n"
+        "Данные берутся из PandaScore API в реальном времени.\n\n"
+        "⚠️ Только для развлечения, не для ставок.",
+        parse_mode="Markdown"
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def today_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("⏳ Загружаю матчи с HLTV.org...")
+    if not PANDASCORE_TOKEN:
+        await update.message.reply_text(
+            "❌ *Не задан PANDASCORE\\_TOKEN*\n\n"
+            "Добавь его в Railway → Variables:\n"
+            "`PANDASCORE_TOKEN = твой_токен`\n\n"
+            "Получить бесплатно: https://app.pandascore.co/signup",
+            parse_mode="Markdown"
+        )
+        return
+
+    msg = await update.message.reply_text("⏳ Загружаю матчи CS2...")
     try:
-        parser = get_parser()
+        parser, _ = make_services()
         matches = await parser.get_today_matches()
 
         if not matches:
             await msg.edit_text(
                 "😔 *Матчей не найдено*\n\n"
-                "Возможные причины:\n"
-                "• Нет матчей на сегодня/завтра\n"
-                "• HLTV временно недоступен\n\n"
-                "Попробуй через несколько минут.",
+                "Сегодня и завтра нет запланированных матчей CS2,\n"
+                "либо они ещё не добавлены в расписание.\n\n"
+                "Попробуй завтра или загляни на hltv.org",
                 parse_mode="Markdown"
             )
             return
 
-        matches = await parser.inject_ranks(matches)
         context.user_data["matches"] = matches
 
         keyboard = []
         for i, m in enumerate(matches):
-            stars = "⭐" * min(m.get("stars", 0), 5)
-            time_str = m.get("time", "TBD")
+            stars = "⭐" * min(m.get("stars", 0), 3)
+            time_str = m.get("time", "?")
             t1 = m["team1"][:14]
             t2 = m["team2"][:14]
+            maps = m.get("maps", "")
             live_icon = "🔴 " if m.get("live") else ""
-            r1 = m.get("team1_rank")
-            r2 = m.get("team2_rank")
-            rank_str = f" [#{r1}v#{r2}]" if r1 and r2 else ""
-            btn = f"{live_icon}{stars} {time_str} | {t1} vs {t2}{rank_str}"
-            keyboard.append([InlineKeyboardButton(btn, callback_data=f"match_{i}")])
+            label = f"{live_icon}{stars} {time_str} {maps} | {t1} vs {t2}"
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"match_{i}")])
 
         await msg.edit_text(
-            f"📅 *Матчи CS2* — {len(matches)} шт.\n\n👇 Нажми для анализа:",
+            f"📅 *Матчи CS2* — {len(matches)} шт. (МСК)\n\n👇 Нажми для анализа:",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     except Exception as e:
-        logger.error(f"today_matches ошибка: {e}", exc_info=True)
-        await msg.edit_text("❌ Ошибка загрузки. Попробуй через минуту.")
+        logger.error(f"today_matches: {e}", exc_info=True)
+        await msg.edit_text("❌ Ошибка загрузки. Проверь PANDASCORE_TOKEN в переменных Railway.")
 
 
 async def analyze_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -115,22 +108,21 @@ async def analyze_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     match = matches[idx]
-    t1 = match["team1"]
-    t2 = match["team2"]
-
+    t1, t2 = match["team1"], match["team2"]
     await query.edit_message_text(
-        f"🔍 Загружаю статистику *{t1}* и *{t2}*...\n_(10–20 сек)_",
+        f"🔍 Анализирую *{t1}* vs *{t2}*...\n_(загружаю историю матчей)_",
         parse_mode="Markdown"
     )
 
     try:
-        analysis = await get_analyzer().analyze(match)
+        _, analyzer = make_services()
+        analysis = await analyzer.analyze(match)
         text = _format(analysis)
         kb = [[InlineKeyboardButton("◀️ Назад", callback_data="back")]]
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
     except Exception as e:
-        logger.error(f"analyze_match ошибка: {e}", exc_info=True)
-        await query.edit_message_text(f"❌ Не удалось загрузить статистику.\nПопробуй позже.")
+        logger.error(f"analyze_match: {e}", exc_info=True)
+        await query.edit_message_text("❌ Ошибка загрузки статистики. Попробуй позже.")
 
 
 def _bar(p: float) -> str:
@@ -138,10 +130,10 @@ def _bar(p: float) -> str:
     return "█" * f + "░" * (10 - f)
 
 
-def _fmt(val, suffix="", decimals=1):
-    if val is None:
-        return "N/A"
-    return f"{val:.{decimals}f}{suffix}"
+def _val(v, suffix="", dec=1):
+    if v is None:
+        return "нет данных"
+    return f"{v:.{dec}f}{suffix}"
 
 
 def _format(a: dict) -> str:
@@ -150,34 +142,37 @@ def _format(a: dict) -> str:
     p2 = a["prediction"]["team2_win_chance"]
     winner = t1["name"] if p1 >= p2 else t2["name"]
     conf = max(p1, p2)
-    label = "🔥 Высокая уверенность" if conf >= 70 else ("✅ Средняя" if conf >= 60 else "⚖️ Примерно равно")
+    label = ("🔥 Явный фаворит" if conf >= 70
+             else "✅ Небольшое преимущество" if conf >= 60
+             else "⚖️ Примерно равные шансы")
+
+    maps = a.get("maps", "")
+    maps_str = f" • {maps}" if maps else ""
 
     text = (
         f"🎮 *{t1['name']}* vs *{t2['name']}*\n"
-        f"🏆 _{a.get('event','?')}_\n"
+        f"🏆 _{a.get('event','CS2')}{maps_str}_\n"
         f"{'—'*26}\n\n"
-        f"📊 *Шансы:*\n"
-        f"`{_bar(p1)}` *{t1['name']}* {p1:.0f}%\n"
-        f"`{_bar(p2)}` *{t2['name']}* {p2:.0f}%\n\n"
-        f"🎯 Победит: *{winner}* — {label}\n\n"
+        f"📊 *Шансы на победу:*\n"
+        f"`{_bar(p1)}` *{t1['name']}*: *{p1:.0f}%*\n"
+        f"`{_bar(p2)}` *{t2['name']}*: *{p2:.0f}%*\n\n"
+        f"🎯 *{winner}* — {label}\n\n"
         f"{'—'*26}\n"
-        f"📈 *Статистика HLTV:*\n\n"
+        f"📈 *Статистика (PandaScore API):*\n\n"
         f"*{t1['name']}*\n"
-        f"  📍 Рейтинг: {_fmt(t1.get('rank'), decimals=0)}\n"
-        f"  🏅 Winrate: {_fmt(t1.get('winrate'),'%')}\n"
-        f"  ⚡ K/D: {_fmt(t1.get('avg_rating'), decimals=2)}\n"
+        f"  🏅 Winrate: {_val(t1.get('winrate'),'%')}\n"
         f"  🔥 Форма: `{t1.get('form') or '?????'}`\n\n"
         f"*{t2['name']}*\n"
-        f"  📍 Рейтинг: {_fmt(t2.get('rank'), decimals=0)}\n"
-        f"  🏅 Winrate: {_fmt(t2.get('winrate'),'%')}\n"
-        f"  ⚡ K/D: {_fmt(t2.get('avg_rating'), decimals=2)}\n"
+        f"  🏅 Winrate: {_val(t2.get('winrate'),'%')}\n"
         f"  🔥 Форма: `{t2.get('form') or '?????'}`\n"
     )
+
     factors = a["prediction"].get("key_factors", [])
     if factors:
-        text += f"\n{'—'*26}\n🔑 *Факторы:*\n"
+        text += f"\n{'—'*26}\n🔑 *Ключевые факторы:*\n"
         for f in factors:
             text += f"  {f}\n"
+
     text += "\n⚠️ _Только для развлечения._"
     return text
 
@@ -192,15 +187,13 @@ async def back_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = []
     for i, m in enumerate(matches):
-        stars = "⭐" * min(m.get("stars", 0), 5)
-        t1 = m["team1"][:14]
-        t2 = m["team2"][:14]
-        time_str = m.get("time", "TBD")
+        stars = "⭐" * min(m.get("stars", 0), 3)
+        time_str = m.get("time", "?")
+        t1, t2 = m["team1"][:14], m["team2"][:14]
+        maps = m.get("maps", "")
         live_icon = "🔴 " if m.get("live") else ""
-        r1, r2 = m.get("team1_rank"), m.get("team2_rank")
-        rank_str = f" [#{r1}v#{r2}]" if r1 and r2 else ""
         keyboard.append([InlineKeyboardButton(
-            f"{live_icon}{stars} {time_str} | {t1} vs {t2}{rank_str}",
+            f"{live_icon}{stars} {time_str} {maps} | {t1} vs {t2}",
             callback_data=f"match_{i}"
         )])
 
@@ -212,26 +205,32 @@ async def back_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def top_teams(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = await update.message.reply_text("⏳ Загружаю рейтинг...")
+    if not PANDASCORE_TOKEN:
+        await update.message.reply_text("❌ Не задан PANDASCORE_TOKEN в переменных Railway.")
+        return
+    msg = await update.message.reply_text("⏳ Загружаю команды...")
     try:
-        teams = await get_parser().get_top_teams(10)
+        parser, _ = make_services()
+        teams = await parser.get_top_teams(10)
         if not teams:
             await msg.edit_text("❌ Не удалось загрузить. Попробуй позже.")
             return
         medals = ["🥇","🥈","🥉"] + ["🔹"]*7
-        text = "🏆 *Топ-10 команд HLTV:*\n\n"
+        text = "🏆 *CS2 команды (PandaScore):*\n\n"
         for i, t in enumerate(teams):
-            text += f"{medals[i]} *#{t['rank']}* {t['name']}\n"
+            text += f"{medals[i]} {t['name']}\n"
         await msg.edit_text(text, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"top_teams ошибка: {e}")
-        await msg.edit_text("❌ Ошибка загрузки рейтинга.")
+        logger.error(f"top_teams: {e}")
+        await msg.edit_text("❌ Ошибка загрузки.")
 
 
 def main():
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("❌ Укажи токен: export BOT_TOKEN='твой_токен'")
+    if not BOT_TOKEN:
+        print("❌ Укажи BOT_TOKEN в переменных Railway!")
         return
+    if not PANDASCORE_TOKEN:
+        print("⚠️ PANDASCORE_TOKEN не задан — бот запустится, но данные не загрузит")
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))

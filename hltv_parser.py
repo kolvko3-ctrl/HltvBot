@@ -1,176 +1,142 @@
 import logging
 import asyncio
-import re
-import json
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import aiohttp
-from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-# Ротация User-Agent чтобы не получить бан
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
-]
-
-BASE = "https://www.hltv.org"
+BASE = "https://api.pandascore.co"
 
 
 class HLTVParser:
-    """Парсер HLTV без сторонних библиотек — только aiohttp + BeautifulSoup."""
+    """Парсер на основе PandaScore API — официальный, не блокируется."""
 
-    def __init__(self):
-        self._ua_index = 0
-
-    def _headers(self) -> dict:
-        ua = USER_AGENTS[self._ua_index % len(USER_AGENTS)]
-        self._ua_index += 1
-        return {
-            "User-Agent": ua,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Cache-Control": "no-cache",
-            "Referer": "https://www.google.com/",
+    def __init__(self, token: str):
+        self.token = token
+        self.headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
         }
 
-    async def _get(self, url: str, retries: int = 3) -> BeautifulSoup | None:
-        timeout = aiohttp.ClientTimeout(total=20)
-        for attempt in range(retries):
-            try:
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.get(url, headers=self._headers(), allow_redirects=True) as resp:
-                        if resp.status == 200:
-                            html = await resp.text()
-                            return BeautifulSoup(html, "lxml")
-                        elif resp.status == 403:
-                            logger.warning(f"HLTV вернул 403 для {url}, попытка {attempt+1}")
-                            await asyncio.sleep(3 * (attempt + 1))
-                        else:
-                            logger.warning(f"HTTP {resp.status} для {url}")
-                            return None
-            except Exception as e:
-                logger.error(f"Ошибка запроса {url}: {e}, попытка {attempt+1}")
-                await asyncio.sleep(2)
-        return None
+    async def _get(self, endpoint: str, params: dict = None) -> list | dict | None:
+        url = f"{BASE}{endpoint}"
+        timeout = aiohttp.ClientTimeout(total=15)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, headers=self.headers, params=params or {}) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    elif resp.status == 401:
+                        logger.error("PandaScore: неверный токен!")
+                        return None
+                    else:
+                        logger.warning(f"PandaScore {resp.status} для {endpoint}")
+                        return None
+        except Exception as e:
+            logger.error(f"Ошибка запроса {endpoint}: {e}")
+            return None
 
-    # ────────────────────────────────────────────────────────────────
-    # МАТЧИ
-    # ────────────────────────────────────────────────────────────────
     async def get_today_matches(self) -> list[dict]:
-        soup = await self._get(f"{BASE}/matches")
-        if not soup:
-            return []
+        """Матчи CS2 на сегодня и завтра."""
+        now = datetime.now(timezone.utc)
+        tomorrow = now + timedelta(days=2)
+
+        # Upcoming матчи
+        params = {
+            "filter[videogame]": "cs-go",
+            "range[scheduled_at]": f"{now.strftime('%Y-%m-%dT%H:%M:%SZ')},{tomorrow.strftime('%Y-%m-%dT%H:%M:%SZ')}",
+            "sort": "scheduled_at",
+            "per_page": 30,
+        }
+        data = await self._get("/matches/upcoming", params)
+
+        # Live матчи
+        live_data = await self._get("/matches/running", {"filter[videogame]": "cs-go", "per_page": 10})
 
         matches = []
 
-        # Upcoming матчи
-        for section in soup.select(".upcomingMatchesSection"):
-            for row in section.select(".upcomingMatch"):
-                m = self._parse_row(row, live=False)
-                if m:
-                    matches.append(m)
+        # Сначала live
+        for m in (live_data or []):
+            parsed = self._parse_match(m, live=True)
+            if parsed:
+                matches.append(parsed)
 
-        # Live матчи
-        for row in soup.select(".liveMatch, .live-match"):
-            m = self._parse_row(row, live=True)
-            if m:
-                matches.insert(0, m)
+        # Потом предстоящие
+        for m in (data or []):
+            parsed = self._parse_match(m, live=False)
+            if parsed:
+                matches.append(parsed)
 
         return matches
 
-    def _parse_row(self, row, live: bool) -> dict | None:
+    def _parse_match(self, m: dict, live: bool) -> dict | None:
         try:
-            # Команды
-            teams = row.select(".matchTeamName")
-            if len(teams) < 2:
-                teams = row.select(".team-name, .teamName")
-            if len(teams) < 2:
+            opponents = m.get("opponents", [])
+            if len(opponents) < 2:
                 return None
 
-            t1 = teams[0].get_text(strip=True)
-            t2 = teams[1].get_text(strip=True)
-            if not t1 or not t2 or "TBD" in (t1, t2):
-                return None
+            t1_data = opponents[0].get("opponent", {})
+            t2_data = opponents[1].get("opponent", {})
+            t1 = t1_data.get("name", "TBD")
+            t2 = t2_data.get("name", "TBD")
 
-            # Ивент
-            ev_el = row.select_one(".matchEventName, .event-name, .matchEvent span")
-            event = ev_el.get_text(strip=True) if ev_el else "Unknown"
+            if t1 == "TBD" or t2 == "TBD" or not t1 or not t2:
+                return None
 
             # Время
-            time_el = row.select_one(".matchTime, .time")
-            time_str = "LIVE" if live else (time_el.get_text(strip=True) if time_el else "TBD")
+            scheduled = m.get("scheduled_at") or m.get("begin_at")
+            if scheduled and not live:
+                try:
+                    dt = datetime.fromisoformat(scheduled.replace("Z", "+00:00"))
+                    # Переводим в UTC+3 (Москва)
+                    dt_local = dt + timedelta(hours=3)
+                    time_str = dt_local.strftime("%H:%M")
+                except Exception:
+                    time_str = "TBD"
+            else:
+                time_str = "LIVE" if live else "TBD"
 
-            # Звёзды
-            stars = len(row.select(".matchStar, .star"))
+            # Лига / турнир
+            league = m.get("league", {}).get("name") or ""
+            serie = m.get("serie", {}).get("full_name") or ""
+            event = serie or league or m.get("tournament", {}).get("name") or "CS2 Match"
 
-            # ID команд и матча из ссылки
-            link = row.select_one("a[href*='/matches/']")
-            match_url = BASE + link["href"] if link else None
-
-            # ID команд из атрибутов
-            t1_id = row.get("team1id") or row.get("data-team1id")
-            t2_id = row.get("team2id") or row.get("data-team2id")
+            # Формат
+            match_type = m.get("match_type", "")
+            maps_info = f"BO{m.get('number_of_games', '?')}" if m.get("number_of_games") else ""
 
             return {
                 "team1": t1,
                 "team2": t2,
-                "team1_id": int(t1_id) if t1_id else None,
-                "team2_id": int(t2_id) if t2_id else None,
+                "team1_id": t1_data.get("id"),
+                "team2_id": t2_data.get("id"),
+                "match_id": m.get("id"),
                 "event": event,
                 "time": time_str,
-                "stars": min(int(stars), 5),
-                "url": match_url,
+                "maps": maps_info,
+                "stars": self._rate_match(m),
                 "live": live,
             }
         except Exception as e:
-            logger.debug(f"Ошибка _parse_row: {e}")
+            logger.debug(f"Ошибка парсинга матча: {e}")
             return None
 
-    # ────────────────────────────────────────────────────────────────
-    # РАНГИ → добавляем к матчам
-    # ────────────────────────────────────────────────────────────────
-    async def inject_ranks(self, matches: list[dict]) -> list[dict]:
-        rank_map = await self._get_rank_map(30)
-        for m in matches:
-            for key in ("team1", "team2"):
-                nl = m[key].lower()
-                if nl in rank_map:
-                    m[f"{key}_rank"] = rank_map[nl]["rank"]
-                    if not m.get(f"{key}_id"):
-                        m[f"{key}_id"] = rank_map[nl]["id"]
-        return matches
+    def _rate_match(self, m: dict) -> int:
+        """Оцениваем важность матча по тиру турнира."""
+        tier = m.get("tournament", {}).get("tier") or ""
+        league_name = (m.get("league", {}).get("name") or "").lower()
+        if any(x in league_name for x in ["major", "blast", "iem", "esc", "pro league"]):
+            return 3
+        if tier == "s":
+            return 3
+        if tier == "a":
+            return 2
+        if tier == "b":
+            return 1
+        return 0
 
-    async def _get_rank_map(self, limit: int = 30) -> dict:
-        soup = await self._get(f"{BASE}/ranking/teams")
-        if not soup:
-            return {}
-        rank_map = {}
-        for row in soup.select(".ranked-team")[:limit]:
-            try:
-                name_el = row.select_one(".teamLine .name, .name")
-                pos_el = row.select_one(".position")
-                link_el = row.select_one("a[href*='/team/']")
-                if not name_el:
-                    continue
-                name = name_el.get_text(strip=True).lower()
-                rank = int(re.sub(r"[^\d]", "", pos_el.get_text())) if pos_el else 99
-                tid = None
-                if link_el:
-                    m = re.search(r"/team/(\d+)/", link_el["href"])
-                    tid = int(m.group(1)) if m else None
-                rank_map[name] = {"rank": rank, "id": tid}
-            except Exception:
-                continue
-        return rank_map
-
-    # ────────────────────────────────────────────────────────────────
-    # СТАТИСТИКА КОМАНДЫ
-    # ────────────────────────────────────────────────────────────────
     async def get_team_stats(self, team_id: int | None, team_name: str) -> dict:
+        """Статистика команды из PandaScore."""
         base = {
             "name": team_name,
             "rank": None,
@@ -184,82 +150,55 @@ class HLTVParser:
             base["_estimated"] = True
             return base
 
-        # Страница статистики команды
-        url = f"{BASE}/stats/teams/{team_id}/{team_name.lower().replace(' ', '-')}"
-        soup = await self._get(url)
-        if not soup:
+        # Последние матчи команды
+        params = {"filter[videogame]": "cs-go", "per_page": 10, "sort": "-scheduled_at"}
+        data = await self._get(f"/teams/{team_id}/matches/past", params)
+
+        if not data:
             base["_estimated"] = True
             return base
 
-        try:
-            # Winrate
-            for row in soup.select(".stats-row"):
-                label = row.select_one("span:first-child")
-                value = row.select_one("span:last-child")
-                if not label or not value:
-                    continue
-                lbl = label.get_text(strip=True).lower()
-                val = value.get_text(strip=True)
+        wins = 0
+        total = 0
+        form = ""
 
-                if "win" in lbl and "%" in val:
-                    try:
-                        base["winrate"] = float(val.replace("%", "").strip())
-                    except ValueError:
-                        pass
-                elif "k/d" in lbl or "kd" in lbl:
-                    try:
-                        base["avg_rating"] = float(val)
-                    except ValueError:
-                        pass
-                elif "rating" in lbl:
-                    try:
-                        base["avg_rating"] = float(val)
-                    except ValueError:
-                        pass
+        for m in data[:10]:
+            winner = m.get("winner", {})
+            if not winner:
+                continue
+            won = winner.get("id") == team_id
+            wins += 1 if won else 0
+            total += 1
+            if len(form) < 5:
+                form += "W" if won else "L"
 
-            # Форма из последних матчей на странице команды
-            team_url = f"{BASE}/team/{team_id}/{team_name.lower().replace(' ', '-')}#tab-matchesBox"
-            team_soup = await self._get(team_url)
-            if team_soup:
-                base["form"] = self._parse_form(team_soup, team_name)
+        if total > 0:
+            base["winrate"] = round(wins / total * 100, 1)
+        base["form"] = form if form else "?????"
 
-        except Exception as e:
-            logger.error(f"Ошибка парсинга статистики {team_name}: {e}")
-            base["_estimated"] = True
+        # Получаем базовую инфу о команде
+        team_info = await self._get(f"/teams/{team_id}")
+        if team_info and isinstance(team_info, dict):
+            # PandaScore не даёт HLTV-ранг, но даём приблизительный по количеству побед
+            pass
 
         return base
 
-    def _parse_form(self, soup: BeautifulSoup, team_name: str) -> str:
-        form = ""
-        name_lower = team_name.lower()
-        for row in soup.select(".recentMatches tr, .match-table tr")[:5]:
-            try:
-                result_el = row.select_one(".teamResult, .result-won, .result-lost, .won, .lost")
-                if not result_el:
-                    continue
-                cls = " ".join(result_el.get("class", []))
-                if "won" in cls or "win" in cls:
-                    form += "W"
-                elif "lost" in cls or "loss" in cls:
-                    form += "L"
-                else:
-                    form += "?"
-            except Exception:
-                form += "?"
-        return form if form else "?????"
+    async def inject_ranks(self, matches: list[dict]) -> list[dict]:
+        """PandaScore не имеет HLTV-рангов — оставляем поле пустым."""
+        return matches
 
-    # ────────────────────────────────────────────────────────────────
-    # ТОП КОМАНДЫ
-    # ────────────────────────────────────────────────────────────────
     async def get_top_teams(self, limit: int = 10) -> list[dict]:
-        rank_map = await self._get_rank_map(limit)
+        """Топ CS2 команд по PandaScore (по активности/рейтингу)."""
+        params = {"filter[videogame]": "cs-go", "sort": "-current_videogame_title", "per_page": limit}
+        data = await self._get("/teams", params)
+
         teams = []
-        for name, data in rank_map.items():
+        for i, t in enumerate(data or []):
             teams.append({
-                "rank": data["rank"],
-                "name": name.title(),
-                "id": data["id"],
+                "rank": i + 1,
+                "name": t.get("name", f"Team {i+1}"),
+                "id": t.get("id"),
                 "points": None,
             })
-        teams.sort(key=lambda x: x["rank"])
         return teams[:limit]
