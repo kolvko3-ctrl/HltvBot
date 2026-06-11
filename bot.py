@@ -342,6 +342,38 @@ async def top_teams(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("❌ Ошибка.")
 
 
+
+async def debug_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает реальный ответ PandaScore для игрока."""
+    msg = await update.message.reply_text("🔍 Запрашиваю реальный ответ API...")
+    try:
+        parser = HLTVParser(token=PANDASCORE_TOKEN)
+        teams_data = await parser._get("/csgo/teams", {"sort": "-current_videogame_title", "per_page": 1})
+        if not teams_data:
+            await msg.edit_text("❌ Нет команд"); return
+        team_id = teams_data[0].get("id")
+        team_name = teams_data[0].get("name", "?")
+        team_info = await parser._get(f"/teams/{team_id}")
+        players = (team_info or {}).get("players", [])
+        if not players:
+            await msg.edit_text(f"❌ Нет игроков у {team_name}"); return
+        player = players[0]
+        player_id = player.get("id")
+        player_name = player.get("name", "?")
+        raw = await parser._get(f"/csgo/players/{player_id}/stats", {"games_count": 20})
+        if not raw:
+            await msg.edit_text(f"❌ Пустой ответ для {player_name} (id={player_id})"); return
+        lines = [f"👤 *{player_name}* ({team_name})", f"`id={player_id}`", "", "*Все поля API:*"]
+        for k, v in sorted(raw.items()):
+            if v is not None and v != {} and v != []:
+                lines.append(f"  `{k}`: {v}")
+        text = "\n".join(lines)
+        if len(text) > 4000:
+            text = text[:4000] + "\n...(обрезано)"
+        await msg.edit_text(text, parse_mode="Markdown")
+    except Exception as e:
+        await msg.edit_text(f"❌ Ошибка: {e}")
+
 def main():
     if not BOT_TOKEN:
         print("❌ Укажи BOT_TOKEN!"); return
@@ -353,6 +385,7 @@ def main():
     app.add_handler(CallbackQueryHandler(analyze_match, pattern=r"^match_\d+$"))
     app.add_handler(CallbackQueryHandler(page_nav, pattern=r"^page_\d+_\d+$"))
     app.add_handler(CallbackQueryHandler(back_handler, pattern="^back$"))
+    app.add_handler(CommandHandler("debug", debug_api))
     print("🤖 Бот запущен!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
