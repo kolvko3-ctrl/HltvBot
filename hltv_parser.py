@@ -81,7 +81,7 @@ class HLTVParser:
         t = (m.get("tournament", {}).get("tier") or "").lower()
         return {"s": 3, "a": 2, "b": 1}.get(t, 0)
 
-    # ── СТАТИСТИКА КОМАНДЫ (из последних 20 матчей) ───────────────────
+    # ── СТАТИСТИКА КОМАНДЫ ───────────────────────────────────────────
     async def get_team_stats(self, team_id, team_name) -> dict:
         base = {
             "name": team_name, "id": team_id,
@@ -114,7 +114,8 @@ class HLTVParser:
             wins += won; losses += (not won)
             ch = "W" if won else "L"
             if len(form) < 5: form += ch
-            if i < 5: last5_w += won; last5_t += 1
+            if i < 5:
+                last5_w += won; last5_t += 1
             if streak_ch is None: streak_ch = ch; streak = 1
             elif ch == streak_ch: streak += 1
             for game in (m.get("games") or []):
@@ -128,7 +129,8 @@ class HLTVParser:
                     round_diffs.append(s_us - s_them)
 
         total = wins + losses
-        if total == 0: base["_estimated"] = True; return base
+        if total == 0:
+            base["_estimated"] = True; return base
 
         base["winrate"] = round(wins / total * 100, 1)
         if last5_t > 0: base["winrate_last5"] = round(last5_w / last5_t * 100, 1)
@@ -138,69 +140,87 @@ class HLTVParser:
         if round_diffs: base["avg_round_diff"] = round(sum(round_diffs) / len(round_diffs), 1)
         return base
 
-    # ── ИГРОКИ КОМАНДЫ ────────────────────────────────────────────────
+    # ── ИГРОКИ ───────────────────────────────────────────────────────
     async def get_team_players(self, team_id) -> list[dict]:
-        """Состав команды."""
         if not team_id: return []
         data = await self._get(f"/teams/{team_id}")
         if not data or not isinstance(data, dict): return []
         return [
-            {"id": p.get("id"), "name": p.get("name"), "slug": p.get("slug"),
-             "nationality": p.get("nationality"), "role": p.get("role")}
+            {"id": p.get("id"), "name": p.get("name"), "slug": p.get("slug")}
             for p in (data.get("players") or [])
         ]
 
     async def get_player_stats(self, player_id, player_name) -> dict:
-        """Статистика игрока за последние матчи."""
         base = {
             "name": player_name, "id": player_id,
             "kills_per_round": None, "deaths_per_round": None,
-            "kd_ratio": None, "headshot_pct": None,
-            "rating": None, "maps_played": None,
+            "kd_ratio": None, "headshot_pct": None, "maps_played": None,
+            "assists_per_round": None,
         }
         if not player_id: return base
 
-        # Статистика через /csgo/players/{id}/stats с games_count
+        # Правильный эндпоинт: /csgo/players/{id}/stats
         data = await self._get(f"/csgo/players/{player_id}/stats", {"games_count": 20})
-        if not data or not isinstance(data, dict): return base
+        if not data or not isinstance(data, dict):
+            return base
+
+        # Логируем реальные ключи для отладки (первый раз)
+        logger.info(f"Player stats keys for {player_name}: {list(data.keys())}")
+
+        # Пробуем все возможные названия полей которые PandaScore может вернуть
+        kpr = (data.get("kills_per_round")
+               or data.get("average_kills_per_round")
+               or data.get("kill_per_round"))
+        dpr = (data.get("deaths_per_round")
+               or data.get("average_deaths_per_round")
+               or data.get("death_per_round"))
+        hs  = (data.get("headshot_percentage")
+               or data.get("headshots_percentage")
+               or data.get("headshot_percent")
+               or data.get("hs_percentage"))
+        apr = (data.get("assists_per_round")
+               or data.get("average_assists_per_round"))
+        maps = (data.get("games_count")
+                or data.get("maps_played")
+                or data.get("total_games"))
+
+        # Если есть kills/deaths абсолютные — считаем из них
+        if kpr is None and data.get("kills") and data.get("rounds_played"):
+            try: kpr = round(data["kills"] / data["rounds_played"], 3)
+            except: pass
+        if dpr is None and data.get("deaths") and data.get("rounds_played"):
+            try: dpr = round(data["deaths"] / data["rounds_played"], 3)
+            except: pass
+        if hs is None and data.get("headshots") and data.get("kills"):
+            try: hs = round(data["headshots"] / data["kills"] * 100, 1)
+            except: pass
 
         try:
-            stats = data  # ответ сам и есть объект статистики
-            base["kills_per_round"] = stats.get("kills_per_round") or stats.get("average_kills_per_round")
-            base["deaths_per_round"] = stats.get("deaths_per_round") or stats.get("average_deaths_per_round")
-            base["headshot_pct"] = stats.get("headshot_percentage") or stats.get("headshots_percentage")
-            base["maps_played"] = stats.get("games_count") or stats.get("maps_played")
+            if kpr is not None: base["kills_per_round"] = float(kpr)
+            if dpr is not None: base["deaths_per_round"] = float(dpr)
+            if hs is not None: base["headshot_pct"] = float(hs)
+            if apr is not None: base["assists_per_round"] = float(apr)
+            if maps is not None: base["maps_played"] = int(maps)
 
-            k = base["kills_per_round"]
-            d = base["deaths_per_round"]
-            if k and d and d > 0:
+            k, d = base["kills_per_round"], base["deaths_per_round"]
+            if k is not None and d is not None and d > 0:
                 base["kd_ratio"] = round(k / d, 2)
-            elif k and d:
-                base["kd_ratio"] = None
         except Exception as e:
-            logger.debug(f"player_stats {player_name}: {e}")
+            logger.error(f"player_stats parse {player_name}: {e}")
+
         return base
 
     async def get_both_teams_players(self, team1_id, team2_id) -> tuple[list, list]:
-        """Параллельно грузим составы обеих команд и их стату."""
-        players1_raw, players2_raw = await asyncio.gather(
+        p1_raw, p2_raw = await asyncio.gather(
             self.get_team_players(team1_id),
             self.get_team_players(team2_id),
         )
-
         async def enrich(players):
-            tasks = [self.get_player_stats(p["id"], p["name"]) for p in players]
-            stats = await asyncio.gather(*tasks)
-            result = []
-            for p, s in zip(players, stats):
-                result.append({**p, **s})
-            return result
+            stats = await asyncio.gather(*[self.get_player_stats(p["id"], p["name"]) for p in players])
+            return [{**p, **s} for p, s in zip(players, stats)]
 
-        t1_players, t2_players = await asyncio.gather(
-            enrich(players1_raw),
-            enrich(players2_raw),
-        )
-        return t1_players, t2_players
+        t1p, t2p = await asyncio.gather(enrich(p1_raw), enrich(p2_raw))
+        return t1p, t2p
 
     # ── H2H ──────────────────────────────────────────────────────────
     async def get_h2h(self, team1_id, team2_id, team1_name, team2_name) -> dict:
@@ -222,9 +242,9 @@ class HLTVParser:
                 try:
                     sched = (m.get("scheduled_at") or "")[:10]
                     ng = m.get("number_of_games", "?")
-                    won = w_id == team1_id
                     result["last_matches"].append({
-                        "date": sched, "winner": team1_name if won else team2_name,
+                        "date": sched,
+                        "winner": team1_name if w_id == team1_id else team2_name,
                         "format": f"BO{ng}",
                     })
                 except: pass
