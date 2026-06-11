@@ -263,36 +263,35 @@ def _players_page(team: dict, team_name: str) -> str:
         sorted_p = sorted(players, key=lambda p: p.get("kd_ratio") or 0, reverse=True)
         for p in sorted_p:
             name = p.get("name") or "Unknown"
-            kd = p.get("kd_ratio")
-            hs = p.get("headshot_pct")
+            kd   = p.get("kd_ratio")
+            hs   = p.get("headshot_pct")
             maps = p.get("maps_played")
-            kpr = p.get("kills_per_round")
-            dpr = p.get("deaths_per_round")
+            kpg  = p.get("kills_per_round")   # у нас это kills per map/game
+            assists = p.get("assists")
 
-            # Иконка звезды для лучшего игрока
             is_star = star and star.get("id") == p.get("id") and kd is not None
             icon = "⭐ " if is_star else "👤 "
 
-            # Оценка формы игрока по K/D
             if kd is not None:
-                if kd >= 1.2: form_icon = "🔥"
+                if kd >= 1.3:   form_icon = "🔥"
                 elif kd >= 1.0: form_icon = "✅"
-                elif kd >= 0.85: form_icon = "😐"
-                else: form_icon = "❄️"
+                elif kd >= 0.85:form_icon = "😐"
+                else:           form_icon = "❄️"
             else:
                 form_icon = "❓"
 
             text += f"{icon}*{name}* {form_icon}\n"
-            text += f"  K/D: {_v(kd, dec=2)}"
-            if kpr is not None:
-                text += f"  KPR: {_v(kpr, dec=2)}"
-            text += "\n"
-            if hs is not None:
-                text += f"  HS%: {_v(hs, '%')}"
-            if maps is not None:
-                text += f"  Карт: {maps}"
-            if hs is not None or maps is not None:
-                text += "\n"
+            # Строка 1: K/D и убийств за карту
+            kd_str = _v(kd, dec=2)
+            kpg_str = f"  Kills/map: {_v(kpg, dec=1)}" if kpg is not None else ""
+            text += f"  K/D: {kd_str}{kpg_str}\n"
+            # Строка 2: HS% и карты
+            hs_str  = f"  HS%: {_v(hs, '%')}" if hs is not None else ""
+            map_str = f"  Карт: {maps}" if maps is not None else ""
+            ast_str = f"  Assists: {assists}" if assists else ""
+            extra = (hs_str + map_str + ast_str).strip()
+            if extra:
+                text += f"  {extra.strip()}\n"
             text += "\n"
 
     # Средняя стата команды
