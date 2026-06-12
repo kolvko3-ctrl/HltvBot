@@ -64,10 +64,12 @@ async def today_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text("😔 *Матчей не найдено*\n\nНа сегодня/завтра матчей CS2 нет.", parse_mode="Markdown")
             return
         context.user_data["matches"] = matches
+        kb = _matches_kb(matches)
+        kb.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
         await msg.edit_text(
             f"📅 *Матчи CS2* — {len(matches)} шт. (МСК)\n\n👇 Нажми для анализа:",
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(_matches_kb(matches))
+            reply_markup=InlineKeyboardMarkup(kb)
         )
     except Exception as e:
         logger.error(f"today_matches: {e}", exc_info=True)
@@ -172,8 +174,11 @@ def _page_kb(page, total, match_idx):
         row.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"page_{match_idx}_{page-1}"))
     if page < total - 1:
         row.append(InlineKeyboardButton("Вперёд ➡️", callback_data=f"page_{match_idx}_{page+1}"))
-    back = [InlineKeyboardButton("◀️ К матчам", callback_data="back")]
-    return InlineKeyboardMarkup([row, back] if row else [back])
+    nav = [
+        InlineKeyboardButton("◀️ К матчам", callback_data="back"),
+        InlineKeyboardButton("🏠 Меню", callback_data="main_menu"),
+    ]
+    return InlineKeyboardMarkup([row, nav] if row else [nav])
 
 
 # ── ФОРМАТИРОВАНИЕ СТРАНИЦ ───────────────────────────────────────────
@@ -312,11 +317,47 @@ async def back_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     matches = context.user_data.get("matches", [])
     if not matches:
         await query.edit_message_text("Введи /today"); return
+    kb = _matches_kb(matches)
+    kb.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
     await query.edit_message_text(
         f"📅 *Матчи CS2* — {len(matches)} шт.\n\n👇 Нажми для анализа:",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(_matches_kb(matches))
+        reply_markup=InlineKeyboardMarkup(kb)
     )
+
+
+async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "🏠 *Главное меню*\n\n"
+        "📋 *Команды:*\n"
+        "/today — матчи на сегодня/завтра\n"
+        "/top — топ команды\n"
+        "/help — как работает анализ",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("📅 Матчи сегодня", callback_data="goto_today"),
+            InlineKeyboardButton("🏆 Топ команды", callback_data="goto_top"),
+        ]])
+    )
+
+
+async def goto_today_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    # Эмулируем команду /today
+    matches = context.user_data.get("matches", [])
+    if matches:
+        kb = _matches_kb(matches)
+        kb.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+        await query.edit_message_text(
+            f"📅 *Матчи CS2* — {len(matches)} шт.\n\n👇 Нажми для анализа:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+    else:
+        await query.edit_message_text("Введи /today для загрузки матчей")
 
 
 # ── ТОП ──────────────────────────────────────────────────────────────
@@ -387,6 +428,8 @@ def main():
     app.add_handler(CallbackQueryHandler(analyze_match, pattern=r"^match_\d+$"))
     app.add_handler(CallbackQueryHandler(page_nav, pattern=r"^page_\d+_\d+$"))
     app.add_handler(CallbackQueryHandler(back_handler, pattern="^back$"))
+    app.add_handler(CallbackQueryHandler(main_menu_handler, pattern="^main_menu$"))
+    app.add_handler(CallbackQueryHandler(goto_today_handler, pattern="^goto_today$"))
     print("🤖 Бот запущен!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 

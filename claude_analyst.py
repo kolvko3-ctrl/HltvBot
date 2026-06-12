@@ -1,7 +1,6 @@
 """
 Groq API — бесплатно, быстро, без жёстких лимитов.
-Получить ключ: https://console.groq.com (войти через Google, ключ сразу)
-Модель: llama-3.3-70b-versatile — отлично знает CS2
+Получить ключ: https://console.groq.com
 """
 import aiohttp
 import json
@@ -33,23 +32,23 @@ async def claude_analyze(team1: str, team2: str, event: str,
         if t.get("avg_round_diff") is not None:
             s = "+" if t["avg_round_diff"] > 0 else ""
             parts.append(f"round_diff={s}{t['avg_round_diff']:.1f}")
-        return ", ".join(parts) or "no data"
+        return ", ".join(parts) or "нет данных"
 
-    prompt = f"""You are a professional CS2 match analyst. Analyze this match and respond ONLY with valid JSON.
+    prompt = f"""Ты профессиональный аналитик CS2 матчей. Проанализируй матч и ответь ТОЛЬКО валидным JSON на русском языке.
 
-Match: {team1} vs {team2}
-Tournament: {event}
-Format: {maps_format}
+Матч: {team1} vs {team2}
+Турнир: {event}
+Формат: {maps_format}
 
-Recent stats:
+Статистика:
 {team1}: {fmt(t1_stats)}
 {team2}: {fmt(t2_stats)}
 H2H: {h2h_str}
 
-Use your knowledge of current rosters, HLTV player ratings, recent tournament results, and team playstyles.
+Используй свои знания о текущих составах команд, рейтингах игроков на HLTV, последних результатах на турнирах и стиле игры каждой команды.
 
-Respond ONLY with this exact JSON structure, no markdown, no explanation:
-{{"team1_win_pct": <integer 25-80>, "team2_win_pct": <integer 25-80, sum must equal 100>, "verdict": "<one line who is favorite and why>", "team1_players": [{{"name": "<ingame name>", "role": "<role>", "rating": <float 0.9-1.5>, "form": "<горячая/хорошая/средняя/слабая>", "note": "<one key fact>"}}], "team2_players": [{{"name": "<ingame name>", "role": "<role>", "rating": <float 0.9-1.5>, "form": "<горячая/хорошая/средняя/слабая>", "note": "<one key fact>"}}], "key_maps": "<maps each team is strong on>", "key_factors": ["<factor1>", "<factor2>", "<factor3>"], "summary": "<2 sentence analysis>"}}"""
+Ответь ТОЛЬКО этим JSON без markdown и пояснений, все текстовые поля на русском:
+{{"team1_win_pct": <целое 25-80>, "team2_win_pct": <целое 25-80, сумма=100>, "verdict": "<1 строка — кто фаворит и почему>", "team1_players": [{{"name": "<игровой ник>", "role": "<роль на русском>", "rating": <float 0.9-1.5>, "form": "<горячая/хорошая/средняя/слабая>", "note": "<1 факт об игроке на русском>"}}], "team2_players": [{{"name": "<игровой ник>", "role": "<роль на русском>", "rating": <float 0.9-1.5>, "form": "<горячая/хорошая/средняя/слабая>", "note": "<1 факт об игроке на русском>"}}], "key_maps": "<карты где каждая команда сильна — на русском>", "key_factors": ["<фактор 1 на русском>", "<фактор 2>", "<фактор 3>"], "summary": "<2 предложения итогового анализа на русском>"}}"""
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -69,7 +68,7 @@ Respond ONLY with this exact JSON structure, no markdown, no explanation:
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
                 if resp.status == 429:
-                    logger.warning("Groq 429 — слишком много запросов, подождите")
+                    logger.warning("Groq 429 — слишком много запросов")
                     return None
                 if resp.status != 200:
                     txt = await resp.text()
@@ -79,11 +78,8 @@ Respond ONLY with this exact JSON structure, no markdown, no explanation:
                 data = await resp.json()
                 text = data["choices"][0]["message"]["content"].strip()
                 result = json.loads(text)
-
-                # Проверяем что сумма = 100
                 p1 = int(result.get("team1_win_pct", 50))
-                p2 = int(result.get("team2_win_pct", 50))
-                if p1 + p2 != 100:
+                if p1 + int(result.get("team2_win_pct", 50)) != 100:
                     result["team2_win_pct"] = 100 - p1
                 return result
 
