@@ -51,6 +51,11 @@ class MatchAnalyzer:
             "h2h": h2h, "prediction": prediction,
         }
 
+
+    def _calc_from_stats(self, t1: dict, t2: dict, h2h: dict) -> dict:
+        """Публичная обёртка для вызова из bot.py."""
+        return self._calculate(t1, t2, h2h)
+
     def _calculate(self, t1: dict, t2: dict, h2h: dict) -> dict:
         """
         Каждый показатель конвертируется через сигмоиду в диапазон [0..1],

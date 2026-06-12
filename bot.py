@@ -5,12 +5,14 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from hltv_parser import HLTVParser
 from analyzer import MatchAnalyzer
+from claude_analyst import claude_analyze
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-PANDASCORE_TOKEN = os.getenv("PANDASCORE_TOKEN", "")
+BOT_TOKEN         = os.getenv("BOT_TOKEN", "")
+PANDASCORE_TOKEN  = os.getenv("PANDASCORE_TOKEN", "")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 
 def make_services():
@@ -18,16 +20,15 @@ def make_services():
     return p, MatchAnalyzer(parser=p)
 
 
-# ── КОМАНДЫ ─────────────────────────────────────────────────────────
+# ── СТАРТ / ПОМОЩЬ ──────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *HLTV Match Predictor Bot*\n\n"
-        "Анализирую CS2 матчи по реальным данным PandaScore:\n"
-        "• Статистика каждого игрока (K/D, HS%)\n"
-        "• Форма команды за 20 матчей\n"
-        "• Разница раундов, H2H встречи\n\n"
-        "📋 *Команды:*\n"
-        "/today — матчи на сегодня/завтра\n"
+        "Анализирую CS2 матчи:\n"
+        "• Реальная статистика команд (PandaScore)\n"
+        "• Состав и форма игроков (AI анализ)\n"
+        "• H2H история встреч\n\n"
+        "📋 /today — матчи на сегодня/завтра\n"
         "/top — топ команды\n"
         "/help — как работает анализ",
         parse_mode="Markdown"
@@ -35,38 +36,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ai = "✅ подключён" if ANTHROPIC_API_KEY else "❌ не настроен (добавь ANTHROPIC\\_API\\_KEY)"
     await update.message.reply_text(
-        "🤖 *Что анализируется:*\n\n"
-        "📊 Общий винрейт команды — 20%\n"
-        "📈 Винрейт последних 5 матчей — 20%\n"
-        "🔥 Форма (последние 5 результатов) — 15%\n"
-        "🎯 Средняя разница раундов в картах — 20%\n"
-        "⚡ Avg K/D всего состава — 15%\n"
-        "🤝 H2H личные встречи — 10%\n\n"
-        "Для каждого игрока показываю:\n"
-        "K/D, HS%, раундов сыграно, форму\n\n"
-        "⚠️ Только для развлечения, не для ставок.",
+        "🤖 *Как работает анализ:*\n\n"
+        "📊 Winrate 20 матчей — 20%\n"
+        "📈 Winrate посл. 5 — 20%\n"
+        "🔥 Форма взвешенная — 15%\n"
+        "🎯 Avg разница раундов — 20%\n"
+        "⚡ K/D состава (AI) — 15%\n"
+        "🤝 H2H встречи — 10%\n\n"
+        f"🤖 AI анализ игроков: {ai}\n\n"
+        "⚠️ Только для развлечения.",
         parse_mode="Markdown"
     )
 
 
+# ── МАТЧИ ────────────────────────────────────────────────────────────
 async def today_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not PANDASCORE_TOKEN:
-        await update.message.reply_text(
-            "❌ Не задан `PANDASCORE_TOKEN` в Railway Variables.\n"
-            "Получить бесплатно: https://app.pandascore.co/signup",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text("❌ Не задан `PANDASCORE_TOKEN` в Railway Variables.", parse_mode="Markdown")
         return
     msg = await update.message.reply_text("⏳ Загружаю матчи CS2...")
     try:
         parser, _ = make_services()
         matches = await parser.get_today_matches()
         if not matches:
-            await msg.edit_text(
-                "😔 *Матчей не найдено*\n\nНа сегодня/завтра матчей CS2 нет.\nПопробуй завтра.",
-                parse_mode="Markdown"
-            )
+            await msg.edit_text("😔 *Матчей не найдено*\n\nНа сегодня/завтра матчей CS2 нет.", parse_mode="Markdown")
             return
         context.user_data["matches"] = matches
         await msg.edit_text(
@@ -76,7 +71,7 @@ async def today_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         logger.error(f"today_matches: {e}", exc_info=True)
-        await msg.edit_text("❌ Ошибка загрузки матчей. Попробуй через минуту.")
+        await msg.edit_text("❌ Ошибка загрузки матчей.")
 
 
 def _matches_kb(matches):
@@ -91,6 +86,7 @@ def _matches_kb(matches):
     return kb
 
 
+# ── АНАЛИЗ МАТЧА ─────────────────────────────────────────────────────
 async def analyze_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -100,215 +96,216 @@ async def analyze_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ Матч не найден. Обнови: /today"); return
 
     match = matches[idx]
+    t1n, t2n = match["team1"], match["team2"]
+
+    ai_note = " + AI анализ игроков" if ANTHROPIC_API_KEY else ""
     await query.edit_message_text(
-        f"🔍 Загружаю глубокую статистику...\n"
-        f"*{match['team1']}* vs *{match['team2']}*\n\n"
-        f"_(составы, K/D игроков, разница раундов, H2H)_",
+        f"🔍 Анализирую *{t1n}* vs *{t2n}*...\n"
+        f"_(статистика{ai_note})_",
         parse_mode="Markdown"
     )
+
     try:
-        _, analyzer = make_services()
-        analysis = await analyzer.analyze(match)
-        pages = _build_pages(analysis)
+        parser, analyzer = make_services()
+
+        # Загружаем статистику команд и H2H параллельно
+        t1_stats, t2_stats, h2h = await asyncio.gather(
+            parser.get_team_stats(match.get("team1_id"), t1n),
+            parser.get_team_stats(match.get("team2_id"), t2n),
+            parser.get_h2h(match.get("team1_id"), match.get("team2_id"), t1n, t2n),
+        )
+
+        # Базовый прогноз из статистики
+        base_pred = analyzer._calc_from_stats(t1_stats, t2_stats, h2h)
+
+        # AI анализ игроков (если ключ есть)
+        ai_result = None
+        if ANTHROPIC_API_KEY:
+            ai_result = await claude_analyze(
+                t1n, t2n,
+                match.get("event", "CS2"),
+                t1_stats, t2_stats, h2h,
+                match.get("maps", "BO?"),
+                ANTHROPIC_API_KEY,
+            )
+
+        # Финальный прогноз: смешиваем базу и AI
+        if ai_result:
+            # 40% вес базовой статистики + 60% AI (знает игроков)
+            p1 = round(base_pred["team1_win_chance"] * 0.4 + ai_result["team1_win_pct"] * 0.6, 1)
+            p2 = round(100 - p1, 1)
+        else:
+            p1 = base_pred["team1_win_chance"]
+            p2 = base_pred["team2_win_chance"]
+
+        pages = _build_pages(t1n, t2n, match, t1_stats, t2_stats, h2h, p1, p2, base_pred, ai_result)
         context.user_data[f"pages_{idx}"] = pages
         context.user_data[f"page_{idx}"] = 0
         await query.edit_message_text(
-            pages[0],
-            parse_mode="Markdown",
+            pages[0], parse_mode="Markdown",
             reply_markup=_page_kb(0, len(pages), idx)
         )
     except Exception as e:
         logger.error(f"analyze_match: {e}", exc_info=True)
-        await query.edit_message_text("❌ Ошибка загрузки статистики. Попробуй позже.")
+        await query.edit_message_text("❌ Ошибка анализа. Попробуй позже.")
 
 
+# ── НАВИГАЦИЯ ────────────────────────────────────────────────────────
 async def page_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    parts = query.data.split("_")  # page_MATCHIDX_PAGEIDX
+    parts = query.data.split("_")
     match_idx, page_idx = int(parts[1]), int(parts[2])
     pages = context.user_data.get(f"pages_{match_idx}", [])
     if not pages:
-        await query.edit_message_text("Нажми /today для обновления"); return
+        await query.edit_message_text("Нажми /today"); return
     page_idx = max(0, min(page_idx, len(pages) - 1))
-    context.user_data[f"page_{match_idx}"] = page_idx
     await query.edit_message_text(
-        pages[page_idx],
-        parse_mode="Markdown",
+        pages[page_idx], parse_mode="Markdown",
         reply_markup=_page_kb(page_idx, len(pages), match_idx)
     )
 
 
-def _page_kb(page: int, total: int, match_idx: int) -> InlineKeyboardMarkup:
+def _page_kb(page, total, match_idx):
     row = []
     if page > 0:
         row.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"page_{match_idx}_{page-1}"))
     if page < total - 1:
         row.append(InlineKeyboardButton("Вперёд ➡️", callback_data=f"page_{match_idx}_{page+1}"))
-    back_row = [InlineKeyboardButton("◀️ К матчам", callback_data="back")]
-    return InlineKeyboardMarkup([row, back_row] if row else [back_row])
+    back = [InlineKeyboardButton("◀️ К матчам", callback_data="back")]
+    return InlineKeyboardMarkup([row, back] if row else [back])
 
 
-# ── ФОРМАТИРОВАНИЕ ──────────────────────────────────────────────────
-def _bar(p: float) -> str:
+# ── ФОРМАТИРОВАНИЕ СТРАНИЦ ───────────────────────────────────────────
+def _bar(p):
     f = round(p / 10)
     return "█" * f + "░" * (10 - f)
-
 
 def _v(val, suffix="", dec=1):
     if val is None: return "—"
     return f"{val:.{dec}f}{suffix}"
 
-
 def _rd(val):
     if val is None: return "—"
     return f"{'+'if val>0 else ''}{val:.1f}"
 
-
 def _streak(s):
     if not s: return "—"
-    icon = "🔥" if s[0] == "W" else "❄️"
-    return f"{icon} {s[0]}×{s[1:]}"
+    return f"{'🔥'if s[0]=='W' else '❄️'} {s[0]}×{s[1:]}"
 
 
-def _build_pages(a: dict) -> list[str]:
-    """Строит список страниц сообщения."""
-    t1, t2 = a["team1"], a["team2"]
-    p = a["prediction"]
-    p1, p2 = p["team1_win_chance"], p["team2_win_chance"]
-    winner = t1["name"] if p1 >= p2 else t2["name"]
+def _build_pages(t1n, t2n, match, t1s, t2s, h2h, p1, p2, base_pred, ai) -> list[str]:
+    winner = t1n if p1 >= p2 else t2n
     conf = max(p1, p2)
-    verdict = (
+    verdict = (ai.get("verdict") if ai else None) or (
         "🔥 Явный фаворит" if conf >= 72 else
         "✅ Небольшое преимущество" if conf >= 62 else
         "📊 Лёгкое преимущество" if conf >= 55 else
         "⚖️ Равные шансы"
     )
-    maps_str = f" • {a['maps']}" if a.get("maps") else ""
-    h2h = a.get("h2h") or {}
+    maps_str = f" • {match['maps']}" if match.get("maps") else ""
+    h2h_total = (h2h or {}).get("total", 0)
 
-    # ── СТРАНИЦА 1: Прогноз + команды ──────────────────────────────
+    # ── Страница 1: Прогноз ─────────────────────────────────────────
     pg1 = (
-        f"🎮 *{t1['name']}* vs *{t2['name']}*\n"
-        f"🏆 _{a.get('event','CS2')}{maps_str}_\n"
+        f"🎮 *{t1n}* vs *{t2n}*\n"
+        f"🏆 _{match.get('event','CS2')}{maps_str}_\n"
         f"{'—'*28}\n\n"
         f"📊 *Шансы на победу:*\n"
-        f"`{_bar(p1)}` *{t1['name']}*  {p1:.0f}%\n"
-        f"`{_bar(p2)}` *{t2['name']}*  {p2:.0f}%\n\n"
+        f"`{_bar(p1)}` *{t1n}*  {p1:.0f}%\n"
+        f"`{_bar(p2)}` *{t2n}*  {p2:.0f}%\n\n"
         f"🎯 *{winner}* — {verdict}\n\n"
         f"{'—'*28}\n"
         f"📈 *Статистика команд:*\n\n"
-
-        f"*{t1['name']}*\n"
-        f"  🏅 Winrate (20 матчей): {_v(t1.get('winrate'), '%')}\n"
-        f"  📈 Winrate (посл. 5): {_v(t1.get('winrate_last5'), '%')}\n"
-        f"  🔥 Форма: `{t1.get('form') or '?????'}`\n"
-        f"  ⚡ Стрик: {_streak(t1.get('streak'))}\n"
-        f"  🎯 Avg ±раундов: {_rd(t1.get('avg_round_diff'))}\n"
-        f"  💀 Avg K/D состава: {_v(t1.get('avg_kd'), dec=2)}\n"
-        f"  🎯 Avg HS%: {_v(t1.get('avg_hs'), '%')}\n\n"
-
-        f"*{t2['name']}*\n"
-        f"  🏅 Winrate (20 матчей): {_v(t2.get('winrate'), '%')}\n"
-        f"  📈 Winrate (посл. 5): {_v(t2.get('winrate_last5'), '%')}\n"
-        f"  🔥 Форма: `{t2.get('form') or '?????'}`\n"
-        f"  ⚡ Стрик: {_streak(t2.get('streak'))}\n"
-        f"  🎯 Avg ±раундов: {_rd(t2.get('avg_round_diff'))}\n"
-        f"  💀 Avg K/D состава: {_v(t2.get('avg_kd'), dec=2)}\n"
-        f"  🎯 Avg HS%: {_v(t2.get('avg_hs'), '%')}\n"
+        f"*{t1n}*\n"
+        f"  🏅 Winrate (20м): {_v(t1s.get('winrate'), '%')}\n"
+        f"  📈 Winrate (посл.5): {_v(t1s.get('winrate_last5'), '%')}\n"
+        f"  🔥 Форма: `{t1s.get('form') or '?????'}`\n"
+        f"  ⚡ Стрик: {_streak(t1s.get('streak'))}\n"
+        f"  🎯 Avg ±раундов: {_rd(t1s.get('avg_round_diff'))}\n\n"
+        f"*{t2n}*\n"
+        f"  🏅 Winrate (20м): {_v(t2s.get('winrate'), '%')}\n"
+        f"  📈 Winrate (посл.5): {_v(t2s.get('winrate_last5'), '%')}\n"
+        f"  🔥 Форма: `{t2s.get('form') or '?????'}`\n"
+        f"  ⚡ Стрик: {_streak(t2s.get('streak'))}\n"
+        f"  🎯 Avg ±раундов: {_rd(t2s.get('avg_round_diff'))}\n"
     )
 
     # H2H
-    h_total = h2h.get("total", 0)
-    if h_total >= 1:
-        pg1 += f"\n{'—'*28}\n🤝 *H2H ({h_total} встреч):*\n"
-        pg1 += f"  {t1['name']}: {h2h.get('team1_wins',0)} побед\n"
-        pg1 += f"  {t2['name']}: {h2h.get('team2_wins',0)} побед\n"
+    if h2h_total >= 1:
+        pg1 += f"\n{'—'*28}\n🤝 *H2H ({h2h_total} встреч):*\n"
+        pg1 += f"  {t1n}: {h2h.get('team1_wins',0)} побед\n"
+        pg1 += f"  {t2n}: {h2h.get('team2_wins',0)} побед\n"
         for lm in h2h.get("last_matches", []):
             pg1 += f"  › {lm['date']} {lm['format']} → 🏆 {lm['winner']}\n"
     else:
         pg1 += f"\n🤝 *H2H:* нет данных\n"
 
-    # Факторы
-    factors = p.get("key_factors", [])
+    # Ключевые факторы
+    factors = []
+    if ai: factors = ai.get("key_factors", [])
+    if not factors: factors = base_pred.get("key_factors", [])
     if factors:
         pg1 += f"\n{'—'*28}\n🔑 *Ключевые факторы:*\n"
-        for f in factors:
-            pg1 += f"  {f}\n"
+        for f in factors[:4]:
+            pg1 += f"  • {f}\n"
 
-    pg1 += f"\n_Стр. 1/3 • Свайп → для состава_"
+    # Карты (если AI знает)
+    if ai and ai.get("key_maps"):
+        pg1 += f"\n🗺 *Карты:* {ai['key_maps']}\n"
 
-    # ── СТРАНИЦА 2: Игроки команды 1 ────────────────────────────────
-    pg2 = _players_page(t1, t1["name"])
+    # Итог от AI
+    if ai and ai.get("summary"):
+        pg1 += f"\n💬 _{ai['summary']}_\n"
 
-    # ── СТРАНИЦА 3: Игроки команды 2 ────────────────────────────────
-    pg3 = _players_page(t2, t2["name"])
+    pg1 += f"\n_Стр. 1/3 — следующая: состав {t1n}_"
+
+    # ── Страница 2: Игроки команды 1 ────────────────────────────────
+    pg2 = _players_page(t1n, ai.get("team1_players") if ai else None)
+
+    # ── Страница 3: Игроки команды 2 ────────────────────────────────
+    pg3 = _players_page(t2n, ai.get("team2_players") if ai else None)
 
     return [pg1, pg2, pg3]
 
 
-def _players_page(team: dict, team_name: str) -> str:
-    players = team.get("players") or []
-    star = team.get("star_player")
-
-    text = (
-        f"👥 *Состав {team_name}*\n"
-        f"{'—'*28}\n\n"
-    )
+def _players_page(team_name: str, players: list | None) -> str:
+    text = f"👥 *Состав {team_name}*\n{'—'*28}\n\n"
 
     if not players:
-        text += "_Нет данных по игрокам_\n"
-    else:
-        # Сортируем по K/D
-        sorted_p = sorted(players, key=lambda p: p.get("kd_ratio") or 0, reverse=True)
-        for p in sorted_p:
-            name = p.get("name") or "Unknown"
-            kd   = p.get("kd_ratio")
-            hs   = p.get("headshot_pct")
-            maps = p.get("maps_played")
-            kpg  = p.get("kills_per_round")   # у нас это kills per map/game
-            assists = p.get("assists")
+        text += (
+            "_Данные о составе недоступны._\n\n"
+            "Добавь `ANTHROPIC_API_KEY` в Railway Variables\n"
+            "для AI-анализа игроков."
+        )
+        text += "\n\n⚠️ _Только для развлечения._"
+        return text
 
-            is_star = star and star.get("id") == p.get("id") and kd is not None
-            icon = "⭐ " if is_star else "👤 "
+    form_icons = {"горячая": "🔥", "хорошая": "✅", "средняя": "😐", "слабая": "❄️"}
+    # Сортируем по рейтингу
+    sorted_p = sorted(players, key=lambda p: p.get("rating") or 0, reverse=True)
 
-            if kd is not None:
-                if kd >= 1.3:   form_icon = "🔥"
-                elif kd >= 1.0: form_icon = "✅"
-                elif kd >= 0.85:form_icon = "😐"
-                else:           form_icon = "❄️"
-            else:
-                form_icon = "❓"
+    for i, p in enumerate(sorted_p):
+        name = p.get("name", "?")
+        role = p.get("role", "")
+        rating = p.get("rating")
+        form = p.get("form", "средняя").lower()
+        note = p.get("note", "")
+        icon = form_icons.get(form, "❓")
+        star = "⭐ " if i == 0 else "👤 "
 
-            text += f"{icon}*{name}* {form_icon}\n"
-            # Строка 1: K/D и убийств за карту
-            kd_str = _v(kd, dec=2)
-            kpg_str = f"  Kills/map: {_v(kpg, dec=1)}" if kpg is not None else ""
-            text += f"  K/D: {kd_str}{kpg_str}\n"
-            # Строка 2: HS% и карты
-            hs_str  = f"  HS%: {_v(hs, '%')}" if hs is not None else ""
-            map_str = f"  Карт: {maps}" if maps is not None else ""
-            ast_str = f"  Assists: {assists}" if assists else ""
-            extra = (hs_str + map_str + ast_str).strip()
-            if extra:
-                text += f"  {extra.strip()}\n"
-            text += "\n"
+        text += f"{star}*{name}* {icon}"
+        if role: text += f" _({role})_"
+        text += "\n"
+        if rating: text += f"  📊 HLTV рейтинг: ~{rating:.2f}\n"
+        if note:   text += f"  💬 {note}\n"
+        text += "\n"
 
-    # Средняя стата команды
-    avg_kd = team.get("avg_kd")
-    avg_hs = team.get("avg_hs")
-    if avg_kd or avg_hs:
-        text += f"{'—'*28}\n"
-        text += f"📊 *Средняя по составу:*\n"
-        if avg_kd: text += f"  K/D: {_v(avg_kd, dec=2)}\n"
-        if avg_hs: text += f"  HS%: {_v(avg_hs, '%')}\n"
-        if star and star.get("name"):
-            text += f"  ⭐ Лучший: {star['name']} (K/D {_v(star.get('kd_ratio'), dec=2)})\n"
-
-    text += f"\n_⚠️ Только для развлечения._"
+    text += "⚠️ _Только для развлечения._"
     return text
 
 
+# ── BACK ─────────────────────────────────────────────────────────────
 async def back_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -322,6 +319,7 @@ async def back_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ── ТОП ──────────────────────────────────────────────────────────────
 async def top_teams(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not PANDASCORE_TOKEN:
         await update.message.reply_text("❌ Не задан PANDASCORE_TOKEN."); return
@@ -330,7 +328,7 @@ async def top_teams(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parser, _ = make_services()
         teams = await parser.get_top_teams(10)
         if not teams:
-            await msg.edit_text("❌ Не удалось загрузить. Попробуй позже."); return
+            await msg.edit_text("❌ Не удалось загрузить."); return
         medals = ["🥇","🥈","🥉"] + ["🔹"]*7
         text = "🏆 *CS2 команды (PandaScore):*\n\n"
         for i, t in enumerate(teams):
@@ -341,81 +339,13 @@ async def top_teams(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("❌ Ошибка.")
 
 
-
-async def debug_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Диагностика: ищем где живёт статистика игроков."""
-    msg = await update.message.reply_text("🔍 Диагностика v3...")
-    try:
-        parser = HLTVParser(token=PANDASCORE_TOKEN)
-        lines = []
-
-        # Берём последний матч
-        matches_raw = await parser._get("/csgo/matches", {
-            "filter[status]": "finished", "sort": "-scheduled_at", "per_page": 1
-        })
-        m = (matches_raw or [None])[0]
-        if not m:
-            await msg.edit_text("❌ Нет матчей"); return
-
-        opps = m.get("opponents", [])
-        team_id = opps[0]["opponent"]["id"] if opps else None
-        team_name = opps[0]["opponent"]["name"] if opps else "?"
-        lines.append(f"✅ {team_name} id=`{team_id}`")
-
-        # Пробуем /csgo/players/{id} (без /stats)
-        team_info = await parser._get(f"/teams/{team_id}")
-        players = (team_info or {}).get("players", [])
-        if players:
-            p0 = players[0]
-            pid = p0.get("id")
-            pslug = p0.get("slug", "")
-            pname = p0.get("name", "?")
-            lines.append(f"👤 {pname} id=`{pid}` slug=`{pslug}`")
-
-            # Вариант 1: /csgo/players/{id} (профиль)
-            r1 = await parser._get(f"/csgo/players/{pid}")
-            lines.append(f"\n*1. /csgo/players/{pid}:*")
-            if r1 and isinstance(r1, dict):
-                for k,v in list(r1.items())[:20]:
-                    if v is not None and v not in ({}, []):
-                        lines.append(f"  `{k}`: `{str(v)[:70]}`")
-            else:
-                lines.append(f"  → `{str(r1)[:100]}`")
-
-            # Вариант 2: /csgo/players/{slug} (по slug)
-            if pslug:
-                r2 = await parser._get(f"/csgo/players/{pslug}")
-                lines.append(f"\n*2. /csgo/players/{pslug}:*")
-                lines.append(f"  → `{str(r2)[:150]}`")
-
-            # Вариант 3: /players/{id}/stats (общий, не csgo)
-            r3 = await parser._get(f"/players/{pid}/stats")
-            lines.append(f"\n*3. /players/{pid}/stats:*")
-            if r3 and isinstance(r3, dict):
-                for k,v in list(r3.items())[:15]:
-                    if v is not None and v not in ({}, []):
-                        lines.append(f"  `{k}`: `{str(v)[:70]}`")
-            else:
-                lines.append(f"  → `{str(r3)[:100]}`")
-
-        # Вариант 4: детальный матч — есть ли results с per-player
-        match_detail = await parser._get(f"/csgo/matches/{m['id']}")
-        lines.append(f"\n*4. /csgo/matches/{m['id']} ключи:*")
-        if match_detail and isinstance(match_detail, dict):
-            for k,v in sorted(match_detail.items()):
-                if k in ("games", "results", "detailed_stats", "players"):
-                    lines.append(f"  `{k}`: `{str(v)[:150]}`")
-
-        text = "\n".join(lines)
-        if len(text) > 4000: text = text[:3900] + "\n...(обрезано)"
-        await msg.edit_text(text, parse_mode="Markdown")
-    except Exception as e:
-        import traceback
-        await msg.edit_text(f"❌\n`{traceback.format_exc()[-600:]}`", parse_mode="Markdown")
-
+# ── MAIN ─────────────────────────────────────────────────────────────
 def main():
     if not BOT_TOKEN:
         print("❌ Укажи BOT_TOKEN!"); return
+    if not ANTHROPIC_API_KEY:
+        print("⚠️ ANTHROPIC_API_KEY не задан — AI анализ игроков отключён")
+
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
@@ -424,7 +354,6 @@ def main():
     app.add_handler(CallbackQueryHandler(analyze_match, pattern=r"^match_\d+$"))
     app.add_handler(CallbackQueryHandler(page_nav, pattern=r"^page_\d+_\d+$"))
     app.add_handler(CallbackQueryHandler(back_handler, pattern="^back$"))
-    app.add_handler(CommandHandler("debug", debug_api))
     print("🤖 Бот запущен!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
