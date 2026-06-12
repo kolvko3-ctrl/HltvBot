@@ -339,6 +339,41 @@ async def top_teams(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("❌ Ошибка.")
 
 
+# ── CHECKENV ─────────────────────────────────────────────────────────
+async def checkenv(update, context):
+    def chk(val, name):
+        if val:
+            return f"✅ `{name}` = `{val[:8]}...{val[-4:]}`"
+        return f"❌ `{name}` — НЕ ЗАДАН"
+    text = "🔧 *Переменные окружения:*\n\n"
+    text += chk(BOT_TOKEN, "BOT_TOKEN") + "\n"
+    text += chk(PANDASCORE_TOKEN, "PANDASCORE_TOKEN") + "\n"
+    text += chk(ANTHROPIC_API_KEY, "ANTHROPIC_API_KEY") + "\n\n"
+    if ANTHROPIC_API_KEY:
+        try:
+            import aiohttp as _aio
+            async with _aio.ClientSession() as s:
+                async with s.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"x-api-key": ANTHROPIC_API_KEY,
+                             "anthropic-version": "2023-06-01",
+                             "content-type": "application/json"},
+                    json={"model": "claude-sonnet-4-6", "max_tokens": 10,
+                          "messages": [{"role": "user", "content": "hi"}]},
+                    timeout=_aio.ClientTimeout(total=10),
+                ) as r:
+                    if r.status == 200:
+                        text += "🤖 Claude API: ✅ работает"
+                    else:
+                        body = await r.text()
+                        text += f"🤖 Claude API: ❌ статус {r.status}\n`{body[:200]}`"
+        except Exception as e:
+            text += f"🤖 Claude API: ❌ `{e}`"
+    else:
+        text += "🤖 Claude API: ❌ ключ не задан"
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
 # ── MAIN ─────────────────────────────────────────────────────────────
 def main():
     if not BOT_TOKEN:
@@ -351,6 +386,7 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("today", today_matches))
     app.add_handler(CommandHandler("top", top_teams))
+    app.add_handler(CommandHandler("checkenv", checkenv))
     app.add_handler(CallbackQueryHandler(analyze_match, pattern=r"^match_\d+$"))
     app.add_handler(CallbackQueryHandler(page_nav, pattern=r"^page_\d+_\d+$"))
     app.add_handler(CallbackQueryHandler(back_handler, pattern="^back$"))
