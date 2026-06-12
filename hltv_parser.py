@@ -321,8 +321,38 @@ class HLTVParser:
         return result
 
     async def get_top_teams(self, limit=10) -> list[dict]:
-        data = await self._get("/csgo/teams", {"sort": "-current_videogame_title", "per_page": limit})
-        return [{"rank": i+1, "name": t.get("name","?"), "id": t.get("id")}
-                for i, t in enumerate(data or [])][:limit]
+        # Метод 1: прямой список команд с сортировкой
+        data = await self._get("/csgo/teams", {
+            "sort": "-current_team_ranking",
+            "per_page": limit,
+        })
+        if data:
+            result = [{"rank": i+1, "name": t.get("name","?"), "id": t.get("id")}
+                      for i, t in enumerate(data)][:limit]
+            if result:
+                return result
+
+        # Метод 2 (fallback): собираем уникальные команды из последних матчей
+        matches = await self._get("/csgo/matches", {
+            "filter[status]": "finished",
+            "sort": "-scheduled_at",
+            "per_page": 50,
+        })
+        if not matches:
+            return []
+
+        seen: dict[int, str] = {}
+        for m in matches:
+            for opp in (m.get("opponents") or []):
+                t = opp.get("opponent", {})
+                tid = t.get("id")
+                name = t.get("name", "?")
+                if tid and tid not in seen:
+                    seen[tid] = name
+            if len(seen) >= limit:
+                break
+
+        return [{"rank": i+1, "name": name, "id": tid}
+                for i, (tid, name) in enumerate(list(seen.items())[:limit])]
 
     async def inject_ranks(self, matches): return matches

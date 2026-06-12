@@ -364,20 +364,47 @@ async def goto_today_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def top_teams(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not PANDASCORE_TOKEN:
         await update.message.reply_text("❌ Не задан PANDASCORE_TOKEN."); return
-    msg = await update.message.reply_text("⏳ Загружаю...")
+
+    # Определяем источник вызова — команда или колбэк
+    is_callback = hasattr(update, "callback_query") and update.callback_query
+    if is_callback:
+        msg = await update.callback_query.edit_message_text("⏳ Загружаю топ команды...")
+        await update.callback_query.answer()
+    else:
+        msg = await update.message.reply_text("⏳ Загружаю топ команды...")
+
     try:
         parser, _ = make_services()
         teams = await parser.get_top_teams(10)
         if not teams:
-            await msg.edit_text("❌ Не удалось загрузить."); return
+            text = "❌ Не удалось загрузить команды. Попробуй позже."
+            if is_callback:
+                await update.callback_query.edit_message_text(text)
+            else:
+                await msg.edit_text(text)
+            return
+
         medals = ["🥇","🥈","🥉"] + ["🔹"]*7
-        text = "🏆 *CS2 команды (PandaScore):*\n\n"
+        text = "🏆 *Топ CS2 команды:*\n\n"
         for i, t in enumerate(teams):
-            text += f"{medals[i]} {t['name']}\n"
-        await msg.edit_text(text, parse_mode="Markdown")
+            text += f"{medals[i]} *{t['name']}*\n"
+        text += "\n_Данные: PandaScore API_"
+
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📅 Матчи сегодня", callback_data="goto_today"),
+            InlineKeyboardButton("🏠 Меню", callback_data="main_menu"),
+        ]])
+        if is_callback:
+            await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+        else:
+            await msg.edit_text(text, parse_mode="Markdown", reply_markup=kb)
     except Exception as e:
-        logger.error(f"top_teams: {e}")
-        await msg.edit_text("❌ Ошибка.")
+        logger.error(f"top_teams: {e}", exc_info=True)
+        err = "❌ Ошибка загрузки команд."
+        if is_callback:
+            await update.callback_query.edit_message_text(err)
+        else:
+            await msg.edit_text(err)
 
 
 # ── CHECKENV ─────────────────────────────────────────────────────────
@@ -430,6 +457,7 @@ def main():
     app.add_handler(CallbackQueryHandler(back_handler, pattern="^back$"))
     app.add_handler(CallbackQueryHandler(main_menu_handler, pattern="^main_menu$"))
     app.add_handler(CallbackQueryHandler(goto_today_handler, pattern="^goto_today$"))
+    app.add_handler(CallbackQueryHandler(top_teams, pattern="^goto_top$"))
     print("🤖 Бот запущен!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
