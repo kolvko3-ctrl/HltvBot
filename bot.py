@@ -343,35 +343,96 @@ async def top_teams(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def debug_api(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает реальный ответ PandaScore для игрока."""
-    msg = await update.message.reply_text("🔍 Запрашиваю реальный ответ API...")
+    """Диагностика: проверяем все эндпоинты и структуру данных."""
+    msg = await update.message.reply_text("🔍 Диагностика...")
     try:
         parser = HLTVParser(token=PANDASCORE_TOKEN)
-        teams_data = await parser._get("/csgo/teams", {"sort": "-current_videogame_title", "per_page": 1})
-        if not teams_data:
-            await msg.edit_text("❌ Нет команд"); return
-        team_id = teams_data[0].get("id")
-        team_name = teams_data[0].get("name", "?")
+        lines = []
+
+        # Шаг 1: ищем команду через матчи (более надёжно)
+        matches_raw = await parser._get("/csgo/matches", {
+            "filter[status]": "finished", "sort": "-scheduled_at", "per_page": 1
+        })
+        if not matches_raw:
+            lines.append("❌ /csgo/matches вернул пусто")
+            await msg.edit_text("\n".join(lines)); return
+
+        m = matches_raw[0]
+        opps = m.get("opponents", [])
+        if not opps:
+            lines.append("❌ Нет opponents в матче")
+            await msg.edit_text("\n".join(lines)); return
+
+        team = opps[0].get("opponent", {})
+        team_id = team.get("id")
+        team_name = team.get("name", "?")
+        lines.append(f"✅ Команда: *{team_name}* (id=`{team_id}`)")
+
+        # Шаг 2: состав команды
         team_info = await parser._get(f"/teams/{team_id}")
-        players = (team_info or {}).get("players", [])
-        if not players:
-            await msg.edit_text(f"❌ Нет игроков у {team_name}"); return
-        player = players[0]
-        player_id = player.get("id")
-        player_name = player.get("name", "?")
-        raw = await parser._get(f"/csgo/players/{player_id}/stats", {"games_count": 20})
-        if not raw:
-            await msg.edit_text(f"❌ Пустой ответ для {player_name} (id={player_id})"); return
-        lines = [f"👤 *{player_name}* ({team_name})", f"`id={player_id}`", "", "*Все поля API:*"]
-        for k, v in sorted(raw.items()):
-            if v is not None and v != {} and v != []:
-                lines.append(f"  `{k}`: {v}")
+        players_list = (team_info or {}).get("players", [])
+        lines.append(f"👥 Игроков в составе: {len(players_list)}")
+        if players_list:
+            p = players_list[0]
+            lines.append(f"   Первый: *{p.get('name')}* id=`{p.get('id')}`")
+
+        # Шаг 3: игры матча
+        games = m.get("games") or []
+        lines.append(f"🎮 Игр в матче: {len(games)}")
+
+        if games:
+            game_id = games[0].get("id")
+            lines.append(f"   Game ID: `{game_id}`")
+
+            # Шаг 4: детали игры
+            gd = await parser._get(f"/csgo/games/{game_id}")
+            if gd:
+                lines.append(f"\n📋 *Ключи /csgo/games/{game_id}:*")
+                for k, v in sorted(gd.items()):
+                    if k == "players" and isinstance(v, list):
+                        lines.append(f"  `players`: {len(v)} шт.")
+                        if v:
+                            lines.append(f"  *Ключи игрока[0]:*")
+                            for pk, pv in list(v[0].items())[:20]:
+                                lines.append(f"    `{pk}`: `{str(pv)[:60]}`")
+                    elif k == "teams" and isinstance(v, list):
+                        lines.append(f"  `teams`: {len(v)} шт.")
+                        if v:
+                            lines.append(f"  *Ключи teams[0]:*")
+                            for tk, tv in list(v[0].items())[:15]:
+                                if tk == "players" and isinstance(tv, list):
+                                    lines.append(f"    `players`: {len(tv)} шт.")
+                                    if tv:
+                                        lines.append(f"    *Ключи teams[0].players[0]:*")
+                                        for ppk, ppv in list(tv[0].items())[:20]:
+                                            lines.append(f"      `{ppk}`: `{str(ppv)[:50]}`")
+                                elif tv is not None:
+                                    lines.append(f"    `{tk}`: `{str(tv)[:60]}`")
+                    elif v is not None and v != [] and v != {}:
+                        lines.append(f"  `{k}`: `{str(v)[:80]}`")
+            else:
+                lines.append("❌ /csgo/games/{id} вернул пусто")
+
+        # Шаг 5: попробуем /csgo/players/{id}/stats напрямую
+        if players_list:
+            pid = players_list[0].get("id")
+            pname = players_list[0].get("name", "?")
+            pstats = await parser._get(f"/csgo/players/{pid}/stats")
+            lines.append(f"\n📊 */csgo/players/{pid}/stats ({pname}):*")
+            if pstats and isinstance(pstats, dict):
+                for k, v in list(pstats.items())[:25]:
+                    if v is not None and v != {} and v != []:
+                        lines.append(f"  `{k}`: `{str(v)[:70]}`")
+            else:
+                lines.append(f"  Ответ: `{str(pstats)[:200]}`")
+
         text = "\n".join(lines)
-        if len(text) > 4000:
-            text = text[:4000] + "\n...(обрезано)"
+        if len(text) > 4000: text = text[:3900] + "\n...(обрезано)"
         await msg.edit_text(text, parse_mode="Markdown")
     except Exception as e:
-        await msg.edit_text(f"❌ Ошибка: {e}")
+        import traceback
+        tb = traceback.format_exc()[-800:]
+        await msg.edit_text(f"❌ Exception:\n`{tb}`", parse_mode="Markdown")
 
 def main():
     if not BOT_TOKEN:

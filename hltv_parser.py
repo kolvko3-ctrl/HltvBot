@@ -140,112 +140,157 @@ class HLTVParser:
         if round_diffs: base["avg_round_diff"] = round(sum(round_diffs) / len(round_diffs), 1)
         return base
 
-    # ── ИГРОКИ: добываем статистику из game-level данных ─────────────
-    async def get_team_players(self, team_id) -> list[dict]:
-        """Состав команды."""
-        if not team_id: return []
-        data = await self._get(f"/teams/{team_id}")
-        if not data or not isinstance(data, dict): return []
-        return [
-            {"id": p.get("id"), "name": p.get("name"), "slug": p.get("slug")}
-            for p in (data.get("players") or [])
-        ]
+    # ── ИГРОКИ ───────────────────────────────────────────────────────
+    async def get_both_teams_players(self, team1_id, team2_id) -> tuple[list, list]:
+        t1p, t2p = await asyncio.gather(
+            self._get_players_all_methods(team1_id),
+            self._get_players_all_methods(team2_id),
+        )
+        return t1p, t2p
 
-    async def get_players_stats_from_games(self, team_id: int, team_name: str) -> list[dict]:
-        """
-        Собираем статистику игроков из последних 5 матчей команды.
-        Endpoint /csgo/games/{id} возвращает players[] с kills/deaths/assists
-        прямо внутри объекта игры — это бесплатно.
-        """
+    async def _get_players_all_methods(self, team_id) -> list[dict]:
+        """Пробуем все способы получить статистику игроков."""
         if not team_id: return []
 
-        # Берём последние 5 завершённых матчей
+        # Метод 1: /csgo/players с фильтром по команде
+        result = await self._players_via_csgo_players(team_id)
+        if result:
+            logger.info(f"Players via /csgo/players: {len(result)} for team {team_id}")
+            return result
+
+        # Метод 2: из игр матчей
+        result = await self._players_via_games(team_id)
+        if result:
+            logger.info(f"Players via games: {len(result)} for team {team_id}")
+            return result
+
+        # Метод 3: только имена из /teams/{id}
+        result = await self._players_names_only(team_id)
+        logger.info(f"Players names only: {len(result)} for team {team_id}")
+        return result
+
+    async def _players_via_csgo_players(self, team_id) -> list[dict]:
+        """GET /csgo/players?filter[team_id]=X"""
+        data = await self._get("/csgo/players", {
+            "filter[team_id]": team_id,
+            "per_page": 10,
+        })
+        if not data or not isinstance(data, list): return []
+
+        players = []
+        # Грузим стату каждого игрока параллельно
+        async def get_stat(p):
+            pid = p.get("id")
+            pname = p.get("name") or "?"
+            stat = await self._get(f"/csgo/players/{pid}/stats", {"games_count": 20})
+            if not stat or not isinstance(stat, dict):
+                return {"id": pid, "name": pname, "kd_ratio": None,
+                        "headshot_pct": None, "maps_played": None,
+                        "kills_per_round": None}
+            # Логируем ключи первый раз
+            logger.info(f"Stats keys for {pname}: {list(stat.keys())[:15]}")
+            kpr  = stat.get("kills_per_round") or stat.get("average_kills_per_round") or stat.get("kill_per_round")
+            dpr  = stat.get("deaths_per_round") or stat.get("average_deaths_per_round")
+            hs   = stat.get("headshot_percentage") or stat.get("headshots_percentage") or stat.get("hs_percentage")
+            maps = stat.get("games_count") or stat.get("maps_played")
+            kd   = round(float(kpr)/float(dpr), 2) if kpr and dpr and float(dpr) > 0 else None
+            return {
+                "id": pid, "name": pname,
+                "kd_ratio": kd,
+                "kills_per_round": float(kpr) if kpr else None,
+                "headshot_pct": float(hs) if hs else None,
+                "maps_played": int(maps) if maps else None,
+            }
+
+        results = await asyncio.gather(*[get_stat(p) for p in data[:7]])
+        valid = [r for r in results if r.get("name")]
+        valid.sort(key=lambda x: x.get("kd_ratio") or 0, reverse=True)
+        return valid
+
+    async def _players_via_games(self, team_id) -> list[dict]:
+        """Берём данные игроков из /csgo/games/{id} — поля players[]."""
         matches = await self._get(f"/teams/{team_id}/matches", {
-            "filter[videogame]": "cs-go",
+            "filter[videogame]": "cs-go", "filter[status]": "finished",
             "sort": "-scheduled_at", "per_page": 5,
-            "filter[status]": "finished",
         })
         if not matches: return []
 
-        # Собираем ID всех игр из этих матчей
         game_ids = []
         for m in matches:
             for g in (m.get("games") or []):
                 gid = g.get("id")
-                if gid and len(game_ids) < 10:
+                if gid and len(game_ids) < 8:
                     game_ids.append(gid)
-
         if not game_ids: return []
 
-        # Грузим детальные данные игр параллельно
-        game_data_list = await asyncio.gather(*[
-            self._get(f"/csgo/games/{gid}") for gid in game_ids
-        ])
+        game_datas = await asyncio.gather(*[self._get(f"/csgo/games/{gid}") for gid in game_ids])
 
-        # Агрегируем статистику по игрокам
-        player_stats: dict[int, dict] = {}
+        agg: dict[int, dict] = {}
+        for gd in game_datas:
+            if not gd or not isinstance(gd, dict): continue
 
-        for game_data in game_data_list:
-            if not game_data or not isinstance(game_data, dict): continue
+            # Пробуем разные места где могут быть игроки
+            players_raw = gd.get("players") or []
 
-            # Игроки лежат в players[] прямо в объекте игры
-            for player in (game_data.get("players") or []):
-                pid = player.get("id")
-                pname = player.get("name") or player.get("player", {}).get("name")
-                if not pid or not pname: continue
+            # Иногда игроки внутри teams
+            if not players_raw:
+                for team in (gd.get("teams") or []):
+                    if (team.get("id") == team_id or
+                        (team.get("team") or {}).get("id") == team_id):
+                        players_raw = team.get("players") or []
+                        break
 
-                # Проверяем что игрок из нашей команды
-                p_team_id = (player.get("team") or {}).get("id")
-                if p_team_id and p_team_id != team_id: continue
+            for p in players_raw:
+                # Проверяем принадлежность к команде
+                p_team = (p.get("team") or {}).get("id") or p.get("team_id")
+                if p_team and p_team != team_id:
+                    continue
 
-                kills = player.get("kills") or 0
-                deaths = player.get("deaths") or 0
-                assists = player.get("assists") or 0
-                hs = player.get("headshots") or 0
+                pid  = p.get("id") or (p.get("player") or {}).get("id")
+                name = p.get("name") or (p.get("player") or {}).get("name") or p.get("nickname")
+                if not pid or not name: continue
 
-                if pid not in player_stats:
-                    player_stats[pid] = {
-                        "id": pid, "name": pname,
-                        "kills": 0, "deaths": 0,
-                        "assists": 0, "headshots": 0,
-                        "games": 0,
-                    }
+                k  = int(p.get("kills") or p.get("kill_count") or 0)
+                d  = int(p.get("deaths") or p.get("death_count") or 0)
+                a  = int(p.get("assists") or p.get("assist_count") or 0)
+                hs = int(p.get("headshots") or p.get("headshot_kills") or 0)
 
-                player_stats[pid]["kills"] += kills
-                player_stats[pid]["deaths"] += deaths
-                player_stats[pid]["assists"] += assists
-                player_stats[pid]["headshots"] += hs
-                player_stats[pid]["games"] += 1
+                if pid not in agg:
+                    agg[pid] = {"id": pid, "name": name, "k": 0, "d": 0, "a": 0, "hs": 0, "g": 0}
+                agg[pid]["k"] += k
+                agg[pid]["d"] += d
+                agg[pid]["a"] += a
+                agg[pid]["hs"] += hs
+                agg[pid]["g"] += 1
 
-        # Считаем K/D и HS%
+        if not agg: return []
+
         result = []
-        for p in player_stats.values():
-            k, d, a = p["kills"], p["deaths"], p["assists"]
-            hs = p["headshots"]
-            games = p["games"]
-            kd = round(k / d, 2) if d > 0 else (float(k) if k > 0 else None)
-            hs_pct = round(hs / k * 100, 1) if k > 0 else None
-            kpr = round(k / games, 2) if games > 0 else None   # kills per map
+        for p in agg.values():
+            k, d, g = p["k"], p["d"], p["g"]
+            kd  = round(k / d, 2) if d > 0 else (float(k) if k > 0 else None)
+            hs_pct = round(p["hs"] / k * 100, 1) if k > 0 else None
             result.append({
-                "id": p["id"],
-                "name": p["name"],
+                "id": p["id"], "name": p["name"],
                 "kd_ratio": kd,
-                "kills_per_round": kpr,   # здесь это kills per game/map
+                "kills_per_round": round(k / g, 1) if g > 0 else None,
                 "headshot_pct": hs_pct,
-                "assists": a,
-                "maps_played": games,
+                "maps_played": g,
+                "assists": p["a"],
             })
-
-        # Сортируем по K/D
         result.sort(key=lambda x: x.get("kd_ratio") or 0, reverse=True)
         return result
 
-    async def get_both_teams_players(self, team1_id, team2_id) -> tuple[list, list]:
-        t1p, t2p = await asyncio.gather(
-            self.get_players_stats_from_games(team1_id, "t1"),
-            self.get_players_stats_from_games(team2_id, "t2"),
-        )
-        return t1p, t2p
+    async def _players_names_only(self, team_id) -> list[dict]:
+        """Фолбэк — хотя бы имена из /teams/{id}."""
+        data = await self._get(f"/teams/{team_id}")
+        if not data or not isinstance(data, dict): return []
+        return [
+            {"id": p.get("id"), "name": p.get("name") or "?",
+             "kd_ratio": None, "headshot_pct": None, "maps_played": None,
+             "kills_per_round": None}
+            for p in (data.get("players") or [])
+        ]
 
     # ── H2H ──────────────────────────────────────────────────────────
     async def get_h2h(self, team1_id, team2_id, team1_name, team2_name) -> dict:
