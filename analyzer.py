@@ -166,17 +166,7 @@ class MatchAnalyzer:
 
         p2 = round(100 - p1, 1)
 
-        # Стрики
-        for team in [t1, t2]:
-            st = team.get("streak", "")
-            if not st: continue
-            try:
-                count = int(st[1:])
-                if st[0] == "W" and count >= 3:
-                    factors.append(f"🔴 {team['name']} — {count} побед подряд!")
-                elif st[0] == "L" and count >= 3:
-                    factors.append(f"❄️ {team['name']} — {count} поражений подряд")
-            except: pass
+        # Стрики намеренно убраны из факторов — слишком много шума
 
         if t1.get("_estimated") or t2.get("_estimated"):
             factors.append("⚠️ Нет истории матчей — прогноз неточный")

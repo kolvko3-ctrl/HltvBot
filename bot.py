@@ -232,7 +232,6 @@ def _build_pages(t1n, t2n, match, t1s, t2s, h2h, p1, p2, base_pred, ai) -> list[
         f"  🏅 Winrate (20м): {_v(t2s.get('winrate'), '%')}\n"
         f"  📈 Winrate (посл.5): {_v(t2s.get('winrate_last5'), '%')}\n"
         f"  🔥 Форма: `{t2s.get('form') or '?????'}`\n"
-        f"  ⚡ Стрик: {_streak(t2s.get('streak'))}\n"
         f"  🎯 Avg ±раундов: {_rd(t2s.get('avg_round_diff'))}\n"
     )
 
