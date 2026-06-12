@@ -1,6 +1,7 @@
 """
-Использует Claude API для глубокого анализа матча.
-Claude знает статистику игроков, историю команд, форму и стиль игры.
+Использует Google Gemini API для анализа матча.
+Бесплатный план: 1500 запросов/день.
+Получить ключ: https://aistudio.google.com/app/apikey
 """
 import aiohttp
 import json
@@ -8,18 +9,13 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-CLAUDE_API = "https://api.anthropic.com/v1/messages"
-CLAUDE_MODEL = "claude-sonnet-4-6"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 
 async def claude_analyze(team1: str, team2: str, event: str,
                           t1_stats: dict, t2_stats: dict,
                           h2h: dict, maps_format: str,
-                          anthropic_key: str) -> dict:
-    """
-    Передаём Claude объективные данные о командах + просим его
-    использовать свои знания об игроках для финального анализа.
-    """
+                          api_key: str) -> dict:
 
     h2h_str = "нет данных"
     if h2h and h2h.get("total", 0) > 0:
@@ -40,79 +36,44 @@ async def claude_analyze(team1: str, team2: str, event: str,
         if t.get("avg_round_diff") is not None:
             sign = "+" if t["avg_round_diff"] > 0 else ""
             lines.append(f"Avg разница раундов: {sign}{t['avg_round_diff']:.1f}")
-        if t.get("maps_played"):
-            lines.append(f"Карт сыграно (база): {t['maps_played']}")
         return "\n".join(lines) if lines else "нет данных"
 
-    prompt = f"""Ты аналитик CS2 матчей. Тебе нужно дать точный прогноз на матч и подробный анализ.
+    prompt = f"""Ты аналитик CS2 матчей. Дай точный прогноз на матч.
 
 МАТЧ: {team1} vs {team2}
 ТУРНИР: {event}
 ФОРМАТ: {maps_format}
 
-ОБЪЕКТИВНАЯ СТАТИСТИКА (PandaScore API):
-
-{team1}:
-{fmt_team(t1_stats)}
-
-{team2}:
-{fmt_team(t2_stats)}
-
+СТАТИСТИКА:
+{team1}: {fmt_team(t1_stats)}
+{team2}: {fmt_team(t2_stats)}
 H2H: {h2h_str}
 
-Используй свои знания о:
-- Текущей форме и составах этих команд (игроки, их рейтинг на HLTV, роли)
-- Стиле игры каждой команды (агрессивный/пассивный, любимые карты)
-- Последних результатах на крупных турнирах
-- Ключевых игроках и их текущей форме (donk, sh1ro, b1t, Aleksib и т.д.)
-- Тренерском штабе и тактических изменениях
+Используй свои знания о текущих составах, рейтингах игроков на HLTV, их форме и стиле игры команд.
 
-Ответь СТРОГО в JSON формате без markdown:
-{{
-  "team1_win_pct": <число от 25 до 80>,
-  "team2_win_pct": <число от 25 до 80, сумма с team1=100>,
-  "verdict": "<одна строка: кто фаворит и почему>",
-  "team1_players": [
-    {{"name": "никнейм", "role": "роль", "rating": <HLTV рейтинг примерно>, "form": "горячая/хорошая/средняя/слабая", "note": "1 факт"}},
-    ...все 5 игроков...
-  ],
-  "team2_players": [
-    {{"name": "никнейм", "role": "роль", "rating": <HLTV рейтинг примерно>, "form": "горячая/хорошая/средняя/слабая", "note": "1 факт"}},
-    ...все 5 игроков...
-  ],
-  "key_maps": "<карты где каждая команда сильна>",
-  "key_factors": ["фактор 1", "фактор 2", "фактор 3", "фактор 4"],
-  "summary": "<2-3 предложения итогового анализа>"
-}}"""
+Ответь ТОЛЬКО в JSON, без markdown и без пояснений:
+{{"team1_win_pct": <25-80>, "team2_win_pct": <25-80, сумма=100>, "verdict": "<кто фаворит и почему, 1 строка>", "team1_players": [{{"name": "ник", "role": "роль", "rating": <1.0-1.5>, "form": "горячая/хорошая/средняя/слабая", "note": "1 факт об игроке"}}], "team2_players": [{{"name": "ник", "role": "роль", "rating": <1.0-1.5>, "form": "горячая/хорошая/средняя/слабая", "note": "1 факт"}}], "key_maps": "<карты где каждая сильна>", "key_factors": ["фактор1", "фактор2", "фактор3"], "summary": "<2 предложения итога>"}}"""
 
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                CLAUDE_API,
-                headers={
-                    "x-api-key": anthropic_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": CLAUDE_MODEL,
-                    "max_tokens": 1500,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
+                f"{GEMINI_URL}?key={api_key}",
+                headers={"Content-Type": "application/json"},
+                json={"contents": [{"parts": [{"text": prompt}]}],
+                      "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1500}},
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
                 if resp.status != 200:
                     txt = await resp.text()
-                    logger.error(f"Claude API {resp.status}: {txt[:200]}")
+                    logger.error(f"Gemini API {resp.status}: {txt[:300]}")
                     return None
                 data = await resp.json()
-                text = data["content"][0]["text"].strip()
-                # Убираем возможные markdown-блоки
+                text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
                 text = text.replace("```json", "").replace("```", "").strip()
                 return json.loads(text)
     except json.JSONDecodeError as e:
         logger.error(f"JSON parse error: {e}")
         return None
     except Exception as e:
-        logger.error(f"Claude API error: {e}")
+        logger.error(f"Gemini API error: {e}")
         return None
