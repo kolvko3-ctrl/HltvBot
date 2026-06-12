@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN         = os.getenv("BOT_TOKEN", "")
 PANDASCORE_TOKEN  = os.getenv("PANDASCORE_TOKEN", "")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 
 def make_services():
@@ -36,7 +36,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ai = "✅ подключён" if GEMINI_API_KEY else "❌ не настроен (добавь ANTHROPIC\\_API\\_KEY)"
+    ai = "✅ подключён" if GROQ_API_KEY else "❌ не настроен (добавь ANTHROPIC\\_API\\_KEY)"
     await update.message.reply_text(
         "🤖 *Как работает анализ:*\n\n"
         "📊 Winrate 20 матчей — 20%\n"
@@ -98,7 +98,7 @@ async def analyze_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
     match = matches[idx]
     t1n, t2n = match["team1"], match["team2"]
 
-    ai_note = " + AI анализ игроков" if GEMINI_API_KEY else ""
+    ai_note = " + AI анализ игроков" if GROQ_API_KEY else ""
     await query.edit_message_text(
         f"🔍 Анализирую *{t1n}* vs *{t2n}*...\n"
         f"_(статистика{ai_note})_",
@@ -120,13 +120,13 @@ async def analyze_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # AI анализ игроков (если ключ есть)
         ai_result = None
-        if GEMINI_API_KEY:
+        if GROQ_API_KEY:
             ai_result = await claude_analyze(
                 t1n, t2n,
                 match.get("event", "CS2"),
                 t1_stats, t2_stats, h2h,
                 match.get("maps", "BO?"),
-                GEMINI_API_KEY,
+                GROQ_API_KEY,
             )
 
         # Финальный прогноз: смешиваем базу и AI
@@ -275,7 +275,7 @@ def _players_page(team_name: str, players: list | None) -> str:
     if not players:
         text += (
             "_Данные о составе недоступны._\n\n"
-            "Добавь `GEMINI_API_KEY` в Railway Variables\n"
+            "Добавь `GROQ_API_KEY` в Railway Variables\n"
             "для AI-анализа игроков."
         )
         text += "\n\n⚠️ _Только для развлечения._"
@@ -348,16 +348,15 @@ async def checkenv(update, context):
     text = "🔧 *Переменные окружения:*\n\n"
     text += chk(BOT_TOKEN, "BOT_TOKEN") + "\n"
     text += chk(PANDASCORE_TOKEN, "PANDASCORE_TOKEN") + "\n"
-    text += chk(GEMINI_API_KEY, "GEMINI_API_KEY") + "\n\n"
-    if GEMINI_API_KEY:
+    text += chk(GROQ_API_KEY, "GROQ_API_KEY") + "\n\n"
+    if GROQ_API_KEY:
         try:
             import aiohttp as _aio
             async with _aio.ClientSession() as s:
                 async with s.post(
-                    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + GEMINI_API_KEY,
-                    headers={"Content-Type": "application/json"},
-                    json={"contents": [{"parts": [{"text": "hi"}]}],
-                          "generationConfig": {"maxOutputTokens": 5}},
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+                    json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5},
                     timeout=_aio.ClientTimeout(total=10),
                 ) as r:
                     if r.status == 200:
@@ -376,8 +375,8 @@ async def checkenv(update, context):
 def main():
     if not BOT_TOKEN:
         print("❌ Укажи BOT_TOKEN!"); return
-    if not GEMINI_API_KEY:
-        print("⚠️ GEMINI_API_KEY не задан — AI анализ игроков отключён")
+    if not GROQ_API_KEY:
+        print("⚠️ GROQ_API_KEY не задан — AI анализ игроков отключён")
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
