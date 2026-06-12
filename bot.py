@@ -384,11 +384,13 @@ async def top_teams(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.edit_text(text)
             return
 
-        medals = ["🥇","🥈","🥉"] + ["🔹"]*7
-        text = "🏆 *Топ CS2 команды:*\n\n"
+        medals = ["🥇","🥈","🥉"] + [f"`#{i+4}`" for i in range(17)]
+        text = "🏆 *Топ CS2 команды (HLTV):*\n\n"
         for i, t in enumerate(teams):
-            text += f"{medals[i]} *{t['name']}*\n"
-        text += "\n_Данные: PandaScore API_"
+            flag = t.get("flag", "🔹")
+            medal = ["🥇","🥈","🥉"][i] if i < 3 else f"`#{t['rank']}`"
+            text += f"{medal} {flag} *{t['name']}*\n"
+        text += "\n_Рейтинг HLTV.org • обновлён 12 июня 2026_"
 
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("📅 Матчи сегодня", callback_data="goto_today"),
