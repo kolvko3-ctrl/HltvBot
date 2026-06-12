@@ -265,16 +265,19 @@ def _build_pages(t1n, t2n, match, t1s, t2s, h2h, p1, p2, base_pred, ai) -> list[
 
     pg1 += f"\n_Стр. 1/3 — следующая: состав {t1n}_"
 
+    # Блок про карты — добавляем на обе страницы составов
+    key_maps = ai.get("key_maps") if ai else None
+
     # ── Страница 2: Игроки команды 1 ────────────────────────────────
-    pg2 = _players_page(t1n, ai.get("team1_players") if ai else None)
+    pg2 = _players_page(t1n, t2n, ai.get("team1_players") if ai else None, key_maps)
 
     # ── Страница 3: Игроки команды 2 ────────────────────────────────
-    pg3 = _players_page(t2n, ai.get("team2_players") if ai else None)
+    pg3 = _players_page(t2n, t1n, ai.get("team2_players") if ai else None, key_maps)
 
     return [pg1, pg2, pg3]
 
 
-def _players_page(team_name: str, players: list | None) -> str:
+def _players_page(team_name: str, opp_name: str, players: list | None, key_maps: str | None) -> str:
     text = f"👥 *Состав {team_name}*\n{'—'*28}\n\n"
 
     if not players:
@@ -287,7 +290,6 @@ def _players_page(team_name: str, players: list | None) -> str:
         return text
 
     form_icons = {"горячая": "🔥", "хорошая": "✅", "средняя": "😐", "слабая": "❄️"}
-    # Сортируем по рейтингу
     sorted_p = sorted(players, key=lambda p: p.get("rating") or 0, reverse=True)
 
     for i, p in enumerate(sorted_p):
@@ -304,6 +306,26 @@ def _players_page(team_name: str, players: list | None) -> str:
         text += "\n"
         if rating: text += f"  📊 HLTV рейтинг: ~{rating:.2f}\n"
         if note:   text += f"  💬 {note}\n"
+        text += "\n"
+
+    # ── Блок про карты ───────────────────────────────────────────────
+    if key_maps:
+        text += f"{'—'*28}\n"
+        text += f"🗺 *Карты:*\n"
+        # Пробуем разбить на строки по командам
+        # Groq часто возвращает: "NaVi силён на Mirage и Ancient; Spirit — на Nuke и Inferno"
+        parts = key_maps.replace(";", "\n").replace(".", "\n").split("\n")
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            # Выделяем команду жирным если находим название в тексте
+            if team_name.lower() in part.lower():
+                text += f"  🟢 {part}\n"
+            elif opp_name.lower() in part.lower():
+                text += f"  🔴 {part}\n"
+            else:
+                text += f"  • {part}\n"
         text += "\n"
 
     text += "⚠️ _Только для развлечения._"
