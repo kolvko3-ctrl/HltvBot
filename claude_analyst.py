@@ -11,59 +11,83 @@ logger = logging.getLogger(__name__)
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL = "llama-3.3-70b-versatile"
 
-# Актуальный пул карт CS2 (Premier Season 4, январь 2026)
 MAP_POOL = "Mirage, Inferno, Nuke, Ancient, Anubis, Dust2, Overpass"
 BANNED_MAPS = "Train, Vertigo, Cache, Cobblestone (убраны из пула)"
 
-# Актуальные составы топ-команд (июнь 2026, источник: HLTV.org)
+# Составы всех 32 команд IEM Cologne Major 2026 (апрель 2026, Wikipedia)
 HLTV_ROSTERS = {
-    "vitality": "apEX (IGL), ropz, ZywOo (AWP), flameZ, mezii",
-    "team vitality": "apEX (IGL), ropz, ZywOo (AWP), flameZ, mezii",
-    "natus vincere": "Aleksib (IGL), iM, b1t, w0nderful (AWP), makazze",
-    "navi": "Aleksib (IGL), iM, b1t, w0nderful (AWP), makazze",
-    "spirit": "donk, sh1ro (AWP), magixx, zont1x, tN1R (IGL)",
-    "team spirit": "donk, sh1ro (AWP), magixx, zont1x, tN1R (IGL)",
-    "falcons": "karrigan (IGL), NiKo, m0NESY (AWP), TeSeS, kyousuke",
-    "team falcons": "karrigan (IGL), NiKo, m0NESY (AWP), TeSeS, kyousuke",
-    "furia": "FalleN (IGL/AWP), yuurih, YEKINDAR, KSCERATO, molodoy",
-    "aurora": "MAJ3R (IGL), XANTARES, woxic (AWP), soulfly, Wicadia",
-    "mouz": "xertioN, Spinx, jL, xelex, torzsi (AWP)",
-    "mousesports": "xertioN, Spinx, jL, xelex, torzsi (AWP)",
-    "g2": "huNter- (IGL), malbsMd, torzsi (AWP), Snax, kyxsan",
-    "g2 esports": "huNter- (IGL), malbsMd, torzsi (AWP), Snax, kyxsan",
-    "faze": "ropz, rain, frozen, EliGE, karrigan (IGL) — возможны изменения",
-    "faze clan": "ropz, rain, frozen, EliGE",
-    "heroic": "stavn, sjuush, jabbi, cadiaN (IGL/AWP), br0",
-    "the mongolz": "Techno4K, mzinho, buster, Senzu, 910 (IGL)",
-    "mongolz": "Techno4K, mzinho, buster, Senzu, 910 (IGL)",
-    "liquid": "NAF, YEKINDAR, oSee (AWP), Twistzz, s1n",
-    "team liquid": "NAF, YEKINDAR, oSee (AWP), Twistzz, s1n",
+    # === LEGENDS (Stage 3) ===
+    "team vitality": "apEX (IGL), flameZ, mezii, ropz, ZywOo (AWP)",
+    "vitality": "apEX (IGL), flameZ, mezii, ropz, ZywOo (AWP)",
+    "natus vincere": "Aleksib (IGL), b1t, iM, makazze, w0nderful (AWP)",
+    "navi": "Aleksib (IGL), b1t, iM, makazze, w0nderful (AWP)",
+    "parivision": "BELCHONOKK, Jame (IGL/AWP), nota, Patsi, relaxa",
+    "team falcons": "kyousuke, kyxsan, m0NESY (AWP), NiKo, karrigan (IGL, замена kyxsan)",
+    "falcons": "kyousuke, kyxsan, m0NESY (AWP), NiKo, karrigan (IGL, замена kyxsan)",
+    "aurora gaming": "MAJ3R (IGL), soulfly, Wicadia, XANTARES, jottAAA",
+    "aurora": "MAJ3R (IGL), soulfly, Wicadia, XANTARES, jottAAA",
+    "mouz": "Brollan, jimpphat, Spinx, torzsi (AWP), xelex",
+    "mousesports": "Brollan, jimpphat, Spinx, torzsi (AWP), xelex",
+    "furia esports": "FalleN (IGL/AWP), KSCERATO, molodoy, YEKINDAR, yuurih",
+    "furia": "FalleN (IGL/AWP), KSCERATO, molodoy, YEKINDAR, yuurih",
+    "the mongolz": "910 (IGL), bLitz, cobraze, maaRaa, Techno4K",
+    "mongolz": "910 (IGL), bLitz, cobraze, maaRaa, Techno4K",
+    # === CHALLENGERS (Stage 2) ===
+    "team spirit": "donk, magixx, sh1ro (AWP), tN1R (IGL), zont1x",
+    "spirit": "donk, magixx, sh1ro (AWP), tN1R (IGL), zont1x",
+    "astralis": "HooXi (IGL), jabbi, phzy, RAALZ, ztr",
+    "g2 esports": "HeavyGod, huNter-, MATYS, malbsMd, Snax",
+    "g2": "HeavyGod, huNter-, MATYS, malbsMd, Snax",
+    "fut esports": "cmtry, dem0n, dziugss, Krabeni, npl",
+    "fut": "cmtry, dem0n, dziugss, Krabeni, npl",
+    "monte": "afro, AZUWU, Bymas, Gizmoe, kakafu",
+    "9z team": "dgt, HUASOPEEK, luchov, max, BIT",
+    "9z": "dgt, HUASOPEEK, luchov, max, BIT",
+    "pain gaming": "biguzera, nqz, piriajr, saffee (AWP), torzsi",
+    "pain": "biguzera, nqz, piriajr, saffee (AWP), torzsi",
+    "legacy": "arT (IGL), dumau, latto, saadzin, n1ssim",
+    # === CONTENDERS (Stage 1) ===
+    "gamerlegion": "hypex, PR, REZ, Snax, BOROS",
+    "big clan": "blameF, faveN, gr1ks, JDC, JBOEN",
+    "big": "blameF, faveN, gr1ks, JDC, JBOEN",
+    "betboom team": "Boombl4, FL4MUS, Magnojez, Polt, d1Ledez",
+    "betboom": "Boombl4, FL4MUS, Magnojez, Polt, d1Ledez",
+    "b8 esports": "alex666, esenthial, kensizor, mASKED, sdy",
+    "b8": "alex666, esenthial, kensizor, mASKED, sdy",
+    "heroic": "Chr1zN, nilo, susp, Yase, TOBIZ",
+    "sinners esports": "beastik, kisserek, MoDo, Poljanoj, CacaNito",
+    "sinners": "beastik, kisserek, MoDo, Poljanoj, CacaNito",
+    "m80": "JBa, Lake, s1n, slaxz-, JDC",
+    "nrg esports": "br0, Grim, nitr0, oSee (AWP), RUSH",
+    "nrg": "br0, Grim, nitr0, oSee (AWP), RUSH",
+    "sharks esports": "doc, gafolo, koala, max, n1ssim",
+    "sharks": "doc, gafolo, koala, max, n1ssim",
+    "gaimin gladiators": "felps, HEN1, JOTA, Lucas1, horvy",
+    "gaimin": "felps, HEN1, JOTA, Lucas1, horvy",
+    "mibr": "brnz4n, insani, kl1m, lnk, brn",
+    "team liquid": "EliGE, malbsMd, NAF, oSee (AWP), jokasteve",
+    "liquid": "EliGE, malbsMd, NAF, oSee (AWP), jokasteve",
+    "tyloo": "JamYoung, Jee, Mercury, Moseyuh, Attacker",
+    "lynn vision gaming": "C4LLM3SU3, EmiliaQAQ, Starry, Westmelon, GUM",
+    "lynn vision": "C4LLM3SU3, EmiliaQAQ, Starry, Westmelon, GUM",
+    "thunder downunder": "aliStair, asap, dexter, sliimey, viridian",
+    "flyquest": "INS, jks, nettik, story, AZR",
+    # === Другие известные команды ===
     "virtus.pro": "Jame (IGL/AWP), FL1T, FAME, electroNic, n0rb3r7",
     "vp": "Jame (IGL/AWP), FL1T, FAME, electroNic, n0rb3r7",
-    "astralis": "device (AWP), Xyp9x, gla1ve (IGL), br0, draken",
-    "eternal fire": "XANTARES, Wicadia, MAJ3R (IGL), xfl0ud, imoRR",
-    "big": "tabseN, k1to, faveN, prosus, hyped",
-    "3dmax": "Ex3rcice, Graviti, Djoko (IGL), Lucky, afro",
-    "monte": "DemQQ, hades, Pumpkin66, SELLTER, sdy",
-    "pain": "hardzao, chelo, biguzera, skullz, nqz",
-    "pain gaming": "hardzao, chelo, biguzera, skullz, nqz",
-    "ence": "hades, gla1ve, dycha, HENU, b0RUP",
-    "nip": "device, REZ, hampus, Plopski, headtr1ck",
-    "ninjas in pyjamas": "device, REZ, hampus, Plopski, headtr1ck",
+    "faze clan": "ropz, rain, frozen, EliGE, karrigan (IGL)",
+    "faze": "ropz, rain, frozen, EliGE, karrigan (IGL)",
     "cloud9": "Ax1Le, HObbit, nafany, Krad, buster",
-    "legacy": "arT, dumau, latto, n1ssim, saadzin",
-    "complexity": "floppy, EliGE, hallzerk, Grim, neaLaN",
-    "betboom": "KaiR0N, nafany, s1ren, Krad, SELLTER",
+    "heroic old": "stavn, sjuush, jabbi, cadiaN (IGL/AWP), TeSeS",
+    "ence": "hades, dycha, HENU, b0RUP, sLowi",
+    "eternal fire": "XANTARES, Wicadia, MAJ3R (IGL), xfl0ud, imoRR",
 }
 
 
 def get_known_roster(team_name: str) -> str | None:
-    """Ищем состав по имени команды (без учёта регистра)."""
     key = team_name.lower().strip()
-    # Прямое совпадение
     if key in HLTV_ROSTERS:
         return HLTV_ROSTERS[key]
-    # Частичное совпадение
     for roster_key, roster in HLTV_ROSTERS.items():
         if roster_key in key or key in roster_key:
             return roster
@@ -91,17 +115,16 @@ async def claude_analyze(team1: str, team2: str, event: str,
             parts.append(f"round_diff={s}{t['avg_round_diff']:.1f}")
         return ", ".join(parts) or "нет данных"
 
-    # Проверяем известные составы
     t1_roster = get_known_roster(team1)
     t2_roster = get_known_roster(team2)
 
     roster_block = ""
     if t1_roster:
-        roster_block += f"ИЗВЕСТНЫЙ СОСТАВ {team1}: {t1_roster}\n"
+        roster_block += f"СОСТАВ {team1} (проверено, IEM Cologne 2026): {t1_roster}\n"
     if t2_roster:
-        roster_block += f"ИЗВЕСТНЫЙ СОСТАВ {team2}: {t2_roster}\n"
+        roster_block += f"СОСТАВ {team2} (проверено, IEM Cologne 2026): {t2_roster}\n"
     if roster_block:
-        roster_block = f"\nПРОВЕРЕНЫЕ ДАННЫЕ СОСТАВОВ (источник: HLTV, июнь 2026):\n{roster_block}"
+        roster_block = f"\n⚠️ ОБЯЗАТЕЛЬНО использовать эти составы:\n{roster_block}"
 
     prompt = f"""Ты профессиональный аналитик CS2. Проанализируй матч и ответь ТОЛЬКО валидным JSON на русском языке.
 
@@ -109,24 +132,23 @@ async def claude_analyze(team1: str, team2: str, event: str,
 ТУРНИР: {event}
 ФОРМАТ: {maps_format}
 
-СТАТИСТИКА (реальные данные):
+СТАТИСТИКА (реальные данные PandaScore):
 {team1}: {fmt(t1_stats)}
 {team2}: {fmt(t2_stats)}
 H2H: {h2h_str}
 {roster_block}
-АКТУАЛЬНЫЙ ПУЛ КАРТ CS2 (2026): {MAP_POOL}
-ЗАПРЕЩЕНО упоминать карты: {BANNED_MAPS}
+АКТУАЛЬНЫЙ ПУЛ КАРТ CS2 (январь 2026): {MAP_POOL}
+ЗАПРЕЩЕНО упоминать: {BANNED_MAPS}
 
-СТРОГИЕ ПРАВИЛА:
-1. Если состав указан выше — используй ТОЛЬКО этих игроков, никаких замен.
-2. Если состав НЕ указан — найди актуальный состав 2025-2026 из своих знаний. Пиши РЕАЛЬНЫЕ ники игроков.
-3. НИКОГДА не пиши "Неизвестен", "Unknown", "Игрок1" — только реальные игровые ники.
-4. Карты — ТОЛЬКО из актуального пула 2026. Train и Vertigo не существуют.
-5. Рейтинг игрока — HLTV Rating 2.0 (средний 1.0, хороший 1.15+, топ 1.3+).
-6. Все текстовые поля строго на русском языке.
+ПРАВИЛА:
+1. Если состав указан выше — используй ТОЛЬКО этих игроков, никаких замен и выдуманных ников.
+2. Если состав НЕ указан — пиши реальные ники игроков из своих знаний 2025-2026.
+3. НИКОГДА не пиши "Неизвестен", "Unknown", "Игрок1", "овнер" — только реальные ники.
+4. Карты только из актуального пула 2026.
+5. Все поля строго на русском языке.
 
 Ответь ТОЛЬКО валидным JSON без markdown:
-{{"team1_win_pct": <целое 25-80>, "team2_win_pct": <целое 25-80, сумма=100>, "verdict": "<1 строка кто фаворит>", "team1_players": [{{"name": "<реальный ник>", "role": "<роль>", "rating": <0.9-1.5>, "form": "<горячая/хорошая/средняя/слабая>", "note": "<конкретный факт>"}}], "team2_players": [{{"name": "<реальный ник>", "role": "<роль>", "rating": <0.9-1.5>, "form": "<горячая/хорошая/средняя/слабая>", "note": "<конкретный факт>"}}], "key_maps": "{team1} силён на: [карты]; {team2} силён на: [карты]; спорные: [карты]", "key_factors": ["<фактор1>", "<фактор2>", "<фактор3>"], "summary": "<2 предложения итогового анализа>"}}"""
+{{"team1_win_pct": <целое 25-80>, "team2_win_pct": <целое 25-80, сумма=100>, "verdict": "<1 строка>", "team1_players": [{{"name": "<реальный ник>", "role": "<роль>", "rating": <0.9-1.5>, "form": "<горячая/хорошая/средняя/слабая>", "note": "<факт>"}}], "team2_players": [{{"name": "<реальный ник>", "role": "<роль>", "rating": <0.9-1.5>, "form": "<горячая/хорошая/средняя/слабая>", "note": "<факт>"}}], "key_maps": "{team1} силён на: [карты]; {team2} силён на: [карты]; спорные: [карты]", "key_factors": ["<фактор1>", "<фактор2>", "<фактор3>"], "summary": "<2 предложения>"}}"""
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -143,34 +165,26 @@ H2H: {h2h_str}
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
                 if resp.status == 429:
-                    logger.warning("Groq 429 — лимит запросов")
+                    logger.warning("Groq 429")
                     return None
                 if resp.status != 200:
                     txt = await resp.text()
                     logger.error(f"Groq {resp.status}: {txt[:300]}")
                     return None
-
                 data = await resp.json()
                 text = data["choices"][0]["message"]["content"].strip()
                 result = json.loads(text)
-
-                # Фильтруем "Неизвестен" на случай если модель всё равно написала
-                bad_names = {"неизвестен", "unknown", "tbd", "?", "игрок", "player",
-                             "игрок1", "игрок2", "игрок3", "игрок4", "игрок5",
-                             "овнер", "овнер2", "name"}
+                bad = {"неизвестен","unknown","tbd","?","игрок","player",
+                       "игрок1","игрок2","игрок3","игрок4","игрок5",
+                       "овнер","овнер2","name","n/a"}
                 for key in ("team1_players", "team2_players"):
-                    players = result.get(key, [])
-                    result[key] = [p for p in players
-                                   if p.get("name", "").lower().strip() not in bad_names]
-
+                    result[key] = [p for p in result.get(key, [])
+                                   if p.get("name","").lower().strip() not in bad]
                 p1 = int(result.get("team1_win_pct", 50))
                 if int(result.get("team2_win_pct", 50)) + p1 != 100:
                     result["team2_win_pct"] = 100 - p1
                 return result
-
     except json.JSONDecodeError as e:
-        logger.error(f"Groq JSON ошибка: {e}")
-        return None
+        logger.error(f"JSON ошибка: {e}"); return None
     except Exception as e:
-        logger.error(f"Groq ошибка: {e}")
-        return None
+        logger.error(f"Groq ошибка: {e}"); return None

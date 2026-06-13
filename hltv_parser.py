@@ -28,14 +28,14 @@ class HLTVParser:
     # ── МАТЧИ ────────────────────────────────────────────────────────
     async def get_today_matches(self) -> list[dict]:
         now = datetime.now(timezone.utc)
-        end = now + timedelta(days=2)
+        end = now + timedelta(days=3)
         fmt = "%Y-%m-%dT%H:%M:%SZ"
         upcoming, live = await asyncio.gather(
             self._get("/csgo/matches/upcoming", {
                 "range[scheduled_at]": f"{now.strftime(fmt)},{end.strftime(fmt)}",
-                "sort": "scheduled_at", "per_page": 30,
+                "sort": "scheduled_at", "per_page": 50,
             }),
-            self._get("/csgo/matches/running", {"per_page": 10}),
+            self._get("/csgo/matches/running", {"per_page": 20}),
         )
         matches = []
         for m in (live or []):
