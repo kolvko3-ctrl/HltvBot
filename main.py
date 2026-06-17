@@ -154,7 +154,7 @@ async def api_analysis(match_idx: int):
             parser.get_team_stats(match.get("team1_id"), t1n),
             parser.get_team_stats(match.get("team2_id"), t2n),
             parser.get_h2h(match.get("team1_id"), match.get("team2_id"), t1n, t2n),
-            parser.get_both_rosters(match.get("team1_id"), match.get("team2_id")),
+            parser.get_both_rosters(match.get("team1_id"), match.get("team2_id"), match.get("match_id")),
         )
         t1_roster, t2_roster = rosters
 
