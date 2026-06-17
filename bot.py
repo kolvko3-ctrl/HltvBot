@@ -200,24 +200,31 @@ async def analyze_match(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         parser, analyzer = make_services()
-        t1_stats, t2_stats, h2h = await asyncio.gather(
+        # Шаг 1: статистика, H2H, реальные составы — параллельно
+        t1_stats, t2_stats, h2h, rosters = await asyncio.gather(
             parser.get_team_stats(match.get("team1_id"), t1n),
             parser.get_team_stats(match.get("team2_id"), t2n),
             parser.get_h2h(match.get("team1_id"), match.get("team2_id"), t1n, t2n),
+            parser.get_both_rosters(match.get("team1_id"), match.get("team2_id")),
         )
+        t1_roster, t2_roster = rosters
+
+        # Шаг 2: модель считает финальные проценты
         base_pred = analyzer._calc_from_stats(t1_stats, t2_stats, h2h)
+        p1 = base_pred["team1_win_chance"]
+        p2 = base_pred["team2_win_chance"]
+
+        # Шаг 3: Groq получает готовые p1/p2 и пишет только текст
         ai_result = None
         if GROQ_API_KEY:
             ai_result = await claude_analyze(
                 t1n, t2n, match.get("event", "CS2"),
                 t1_stats, t2_stats, h2h,
                 match.get("maps", "BO?"), GROQ_API_KEY,
+                p1=p1, p2=p2,
+                team1_roster=t1_roster,
+                team2_roster=t2_roster,
             )
-        if ai_result:
-            p1 = round(base_pred["team1_win_chance"] * 0.4 + ai_result["team1_win_pct"] * 0.6, 1)
-            p2 = round(100 - p1, 1)
-        else:
-            p1, p2 = base_pred["team1_win_chance"], base_pred["team2_win_chance"]
 
         pages = _build_pages(t1n, t2n, match, t1_stats, t2_stats, h2h, p1, p2, base_pred, ai_result)
         context.user_data[f"pages_{idx}"] = pages
