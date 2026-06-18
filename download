@@ -664,8 +664,8 @@ function renderAnalysis(d) {
   const fmtRd = v => v != null ? (v > 0 ? '+' : '') + v.toFixed(1) : '—';
   document.getElementById('stats-comparison').innerHTML = `
     <div class="stats-card-header">📊 Статистика команд</div>
+    ${statRow('Взвешенная форма (7м)', fmtWr(s1.weighted_winrate), fmtWr(s2.weighted_winrate), s1.weighted_winrate, s2.weighted_winrate, d.team1, d.team2)}
     ${statRow('Winrate (20м)', fmtWr(s1.winrate), fmtWr(s2.winrate), s1.winrate, s2.winrate, d.team1, d.team2)}
-    ${statRow('Winrate (посл. 5)', fmtWr(s1.winrate_last5), fmtWr(s2.winrate_last5), s1.winrate_last5, s2.winrate_last5, d.team1, d.team2)}
     ${statRow('Форма', s1.form||'—', s2.form||'—', null, null, '', '')}
     ${statRow('Avg ±раундов', fmtRd(s1.avg_round_diff), fmtRd(s2.avg_round_diff), s1.avg_round_diff, s2.avg_round_diff, d.team1, d.team2)}
   `;
