@@ -68,7 +68,9 @@ class HLTVParser:
             return {
                 "team1": t1, "team2": t2,
                 "team1_id": t1d.get("id"), "team2_id": t2d.get("id"),
-                "match_id": m.get("id"), "event": event,
+                "match_id": m.get("id"),
+                "tournament_id": (m.get("tournament") or {}).get("id"),
+                "event": event,
                 "time": time_str, "maps": f"BO{ng}" if ng else "",
                 "stars": self._tier(m), "live": live,
             }
@@ -82,70 +84,86 @@ class HLTVParser:
         return {"s": 3, "a": 2, "b": 1}.get(t, 0)
 
     # ── РЕАЛЬНЫЙ АКТИВНЫЙ СОСТАВ ─────────────────────────────────────
-    async def get_team_players(self, team_id: int | None, match_id: int | None = None) -> list[str]:
+    async def get_team_players(self, team_id: int | None, tournament_id: int | None = None) -> list[str]:
         """
-        Получает АКТИВНЫЙ состав (только 5 игроков основы), а не весь
-        исторический ростер. Источник в порядке приоритета:
-          1. Состав из самого матча (opponents[].players) — самый точный,
-             т.к. это реально заявленные на игру 5 человек.
-          2. Состав команды на последнем сыгранном матче (fallback).
-          3. /teams/{id} как последний fallback, отфильтрованный по
-             полю is_active если оно есть.
+        Получает АКТИВНЫЙ состав команды на турнире.
+        Источник в порядке приоритета:
+          1. /tournaments/{id}/rosters — официальный способ PandaScore
+             для получения заявленных составов на конкретный турнир.
+             Это решает проблему "старых составов": ростер привязан
+             к турниру, а не к команде вообще.
+          2. /csgo/games/{id} последней сыгранной карты — реальные
+             игроки которые физически были в игре.
+          3. /teams/{id} как последний fallback (полный список, без
+             привязки к актуальности — отсюда и были старые составы).
         """
         if not team_id: return []
 
-        # Способ 1: если есть match_id — берём состав прямо из этого матча
-        if match_id:
-            roster = await self._get_match_roster(match_id, team_id)
+        # Способ 1: официальный ростер турнира
+        if tournament_id:
+            roster = await self._get_tournament_roster(tournament_id, team_id)
             if roster: return roster
 
-        # Способ 2: берём состав из последнего СЫГРАННОГО матча команды
-        recent = await self._get(f"/teams/{team_id}/matches", {
-            "filter[videogame]": "cs-go",
-            "sort": "-scheduled_at", "per_page": 1,
-            "filter[status]": "finished",
-        })
-        if recent:
-            last_match_id = recent[0].get("id")
-            roster = await self._get_match_roster(last_match_id, team_id)
-            if roster: return roster
+        # Способ 2: реальные игроки из последней сыгранной карты
+        roster = await self._get_roster_from_last_game(team_id)
+        if roster: return roster
 
-        # Способ 3 (fallback): полный ростер команды, без фильтра
+        # Способ 3 (последний fallback): общий список команды
         data = await self._get(f"/teams/{team_id}")
         if not data or not isinstance(data, dict): return []
         players = data.get("players") or []
-        # Берём максимум 5 — первые в списке обычно основа
         names = [p["name"] for p in players if p.get("name")]
         return names[:5] if names else []
 
-    async def _get_match_roster(self, match_id: int, team_id: int) -> list[str]:
-        """Достаёт состав конкретной команды из объекта матча (поле opponents)."""
-        if not match_id: return []
-        m = await self._get(f"/csgo/matches/{match_id}")
-        if not m or not isinstance(m, dict): return []
-
-        for opp in (m.get("opponents") or []):
-            o = opp.get("opponent", {})
-            if o.get("id") != team_id:
+    async def _get_tournament_roster(self, tournament_id: int, team_id: int) -> list[str]:
+        """/tournaments/{id}/rosters — официальный эндпоинт ожидаемых составов."""
+        data = await self._get(f"/tournaments/{tournament_id}/rosters")
+        if not data or not isinstance(data, list): return []
+        for entry in data:
+            team = entry.get("team", {})
+            if team.get("id") != team_id:
                 continue
-            players = o.get("players") or []
+            players = entry.get("players") or []
             names = [p["name"] for p in players if p.get("name")]
             if names: return names[:5]
-
-        # Иногда состав лежит в rosters[] на уровне матча
-        for r in (m.get("rosters") or []):
-            if r.get("team", {}).get("id") == team_id:
-                players = r.get("players") or []
-                names = [p["name"] for p in players if p.get("name")]
-                if names: return names[:5]
-
         return []
 
-    async def get_both_rosters(self, team1_id, team2_id, match_id: int | None = None) -> tuple[list[str], list[str]]:
-        """Оба состава параллельно, с привязкой к конкретному матчу если он есть."""
+    async def _get_roster_from_last_game(self, team_id: int) -> list[str]:
+        """
+        Берёт игроков из реального game-объекта последней сыгранной карты.
+        В CS2 players[] на уровне игры содержит тех, кто физически играл —
+        это надёжнее чем команда вообще, т.к. отражает текущий состав.
+        """
+        recent = await self._get(f"/teams/{team_id}/matches", {
+            "filter[videogame]": "cs-go",
+            "sort": "-scheduled_at", "per_page": 3,
+            "filter[status]": "finished",
+        })
+        if not recent: return []
+
+        for m in recent:
+            games = m.get("games") or []
+            for g in games:
+                game_id = g.get("id")
+                if not game_id: continue
+                game_data = await self._get(f"/csgo/games/{game_id}")
+                if not game_data or not isinstance(game_data, dict): continue
+
+                # Игроки лежат в players[] на уровне игры, у каждого team_id
+                all_players = game_data.get("players") or []
+                team_players = [
+                    p for p in all_players
+                    if (p.get("team", {}) or {}).get("id") == team_id
+                ]
+                names = [p["name"] for p in team_players if p.get("name")]
+                if names: return list(dict.fromkeys(names))[:5]  # убираем дубли, сохраняя порядок
+        return []
+
+    async def get_both_rosters(self, team1_id, team2_id, tournament_id: int | None = None) -> tuple[list[str], list[str]]:
+        """Оба состава параллельно, привязаны к турниру если он известен."""
         r1, r2 = await asyncio.gather(
-            self.get_team_players(team1_id, match_id),
-            self.get_team_players(team2_id, match_id),
+            self.get_team_players(team1_id, tournament_id),
+            self.get_team_players(team2_id, tournament_id),
         )
         return r1, r2
 
