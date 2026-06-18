@@ -1,316 +1,247 @@
-import logging
 import asyncio
-from datetime import datetime, timezone, timedelta
-import aiohttp
+import os
+import json
+import logging
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+import uvicorn
+
+from telegram import Update, WebAppInfo, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp
+from telegram.ext import Application, CommandHandler, ContextTypes
+
+from hltv_parser import HLTVParser
+from analyzer import MatchAnalyzer
+from claude_analyst import claude_analyze
+from subscription import check_subscription, activate_code, get_stats, is_admin
+
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
-BASE = "https://api.pandascore.co"
 
+BOT_TOKEN        = os.getenv("BOT_TOKEN", "")
+PANDASCORE_TOKEN = os.getenv("PANDASCORE_TOKEN", "")
+GROQ_API_KEY     = os.getenv("GROQ_API_KEY", "")
+WEBAPP_URL       = os.getenv("WEBAPP_URL", "")  # https://your-app.up.railway.app
 
-class HLTVParser:
-    def __init__(self, token: str):
-        self.token = token
-        self.headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+# ── CACHE ────────────────────────────────────────────────────────────
+_cache: dict = {}
 
-    async def _get(self, endpoint: str, params: dict = None) -> list | dict | None:
-        url = f"{BASE}{endpoint}"
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as s:
-                async with s.get(url, headers=self.headers, params=params or {}) as r:
-                    if r.status == 200:
-                        return await r.json()
-                    logger.warning(f"PandaScore {r.status} {endpoint}")
-                    return None
-        except Exception as e:
-            logger.error(f"Запрос {endpoint}: {e}")
-            return None
+def cache_get(key: str, ttl_min: int = 5):
+    if key in _cache:
+        data, ts = _cache[key]
+        if datetime.utcnow() - ts < timedelta(minutes=ttl_min):
+            return data
+    return None
 
-    # ── МАТЧИ ────────────────────────────────────────────────────────
-    async def get_today_matches(self) -> list[dict]:
-        now = datetime.now(timezone.utc)
-        end = now + timedelta(days=3)
-        fmt = "%Y-%m-%dT%H:%M:%SZ"
-        upcoming, live = await asyncio.gather(
-            self._get("/csgo/matches/upcoming", {
-                "range[scheduled_at]": f"{now.strftime(fmt)},{end.strftime(fmt)}",
-                "sort": "scheduled_at", "per_page": 50,
-            }),
-            self._get("/csgo/matches/running", {"per_page": 20}),
-        )
-        matches = []
-        for m in (live or []):
-            p = self._parse_match(m, live=True)
-            if p: matches.append(p)
-        for m in (upcoming or []):
-            p = self._parse_match(m, live=False)
-            if p: matches.append(p)
-        return matches
+def cache_set(key: str, data):
+    _cache[key] = (data, datetime.utcnow())
 
-    def _parse_match(self, m, live):
-        try:
-            opp = m.get("opponents", [])
-            if len(opp) < 2: return None
-            t1d = opp[0].get("opponent", {})
-            t2d = opp[1].get("opponent", {})
-            t1, t2 = t1d.get("name"), t2d.get("name")
-            if not t1 or not t2: return None
-            sched = m.get("scheduled_at") or m.get("begin_at")
-            time_str = "LIVE"
-            if not live and sched:
-                try:
-                    dt = datetime.fromisoformat(sched.replace("Z", "+00:00")) + timedelta(hours=3)
-                    time_str = dt.strftime("%H:%M")
-                except: time_str = "TBD"
-            league = m.get("league", {}).get("name") or ""
-            serie = m.get("serie", {}).get("full_name") or ""
-            event = serie or league or "CS2"
-            ng = m.get("number_of_games")
-            return {
-                "team1": t1, "team2": t2,
-                "team1_id": t1d.get("id"), "team2_id": t2d.get("id"),
-                "match_id": m.get("id"),
-                "tournament_id": (m.get("tournament") or {}).get("id"),
-                "event": event,
-                "time": time_str, "maps": f"BO{ng}" if ng else "",
-                "stars": self._tier(m), "live": live,
+# ── BOT HANDLERS ─────────────────────────────────────────────────────
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = WEBAPP_URL or "https://example.com"
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🎮 Открыть CS2 Predictor", web_app=WebAppInfo(url=url))
+    ]])
+    await update.message.reply_text(
+        "👋 *CS2 Match Predictor*\n\n"
+        "Анализирую матчи CS2 по реальной статистике.\n"
+        "Нажми кнопку ниже чтобы открыть приложение 👇",
+        parse_mode="Markdown",
+        reply_markup=kb
+    )
+
+async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 Нажми /start чтобы открыть приложение.\n\n"
+        "Для активации подписки используй вкладку *Профиль* в приложении.",
+        parse_mode="Markdown"
+    )
+
+# ── BOT LIFECYCLE ────────────────────────────────────────────────────
+_bot_app: Application | None = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _bot_app
+    if BOT_TOKEN:
+        _bot_app = Application.builder().token(BOT_TOKEN).build()
+        _bot_app.add_handler(CommandHandler("start", start_handler))
+        _bot_app.add_handler(CommandHandler("help", help_handler))
+        await _bot_app.initialize()
+        await _bot_app.start()
+        await _bot_app.updater.start_polling(drop_pending_updates=True)
+        logger.info("Бот запущен")
+        # Устанавливаем кнопку меню
+        if WEBAPP_URL:
+            try:
+                await _bot_app.bot.set_chat_menu_button(
+                    menu_button=MenuButtonWebApp(text="🎮 Открыть", web_app=WebAppInfo(url=WEBAPP_URL))
+                )
+            except Exception as e:
+                logger.warning(f"Не удалось установить кнопку меню: {e}")
+    yield
+    if _bot_app:
+        await _bot_app.updater.stop()
+        await _bot_app.stop()
+        await _bot_app.shutdown()
+
+# ── FASTAPI APP ───────────────────────────────────────────────────────
+app = FastAPI(lifespan=lifespan)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# ── HEALTH CHECK (Railway) ─────────────────────────────────────────
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+# ── API: Serve Mini App ───────────────────────────────────────────────
+@app.get("/", response_class=HTMLResponse)
+async def serve_app():
+    path = os.path.join(os.path.dirname(__file__), "static", "index.html")
+    with open(path, "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
+
+# ── API: Matches ──────────────────────────────────────────────────────
+@app.get("/api/matches")
+async def api_matches():
+    cached = cache_get("matches", ttl_min=5)
+    if cached:
+        return JSONResponse(cached)
+    try:
+        parser = HLTVParser(token=PANDASCORE_TOKEN)
+        matches = await parser.get_today_matches()
+        # Сериализуем
+        result = [
+            {
+                "idx": i,
+                "team1": m["team1"], "team2": m["team2"],
+                "team1_id": m.get("team1_id"), "team2_id": m.get("team2_id"),
+                "event": m.get("event", "CS2"),
+                "time": m.get("time", "TBD"),
+                "maps": m.get("maps", ""),
+                "stars": m.get("stars", 0),
+                "live": m.get("live", False),
+                "match_id": m.get("match_id"),
             }
-        except Exception as e:
-            logger.debug(f"parse_match: {e}"); return None
-
-    def _tier(self, m):
-        ln = (m.get("league", {}).get("name") or "").lower()
-        if any(x in ln for x in ["major", "blast", "iem", "pro league", "esl"]): return 3
-        t = (m.get("tournament", {}).get("tier") or "").lower()
-        return {"s": 3, "a": 2, "b": 1}.get(t, 0)
-
-    # ── РЕАЛЬНЫЙ АКТИВНЫЙ СОСТАВ ─────────────────────────────────────
-    async def get_team_players(self, team_id: int | None, tournament_id: int | None = None) -> list[str]:
-        """
-        Получает АКТИВНЫЙ состав команды на турнире.
-        Источник в порядке приоритета:
-          1. /tournaments/{id}/rosters — официальный способ PandaScore
-             для получения заявленных составов на конкретный турнир.
-             Это решает проблему "старых составов": ростер привязан
-             к турниру, а не к команде вообще.
-          2. /csgo/games/{id} последней сыгранной карты — реальные
-             игроки которые физически были в игре.
-          3. /teams/{id} как последний fallback (полный список, без
-             привязки к актуальности — отсюда и были старые составы).
-        """
-        if not team_id: return []
-
-        # Способ 1: официальный ростер турнира
-        if tournament_id:
-            roster = await self._get_tournament_roster(tournament_id, team_id)
-            if roster: return roster
-
-        # Способ 2: реальные игроки из последней сыгранной карты
-        roster = await self._get_roster_from_last_game(team_id)
-        if roster: return roster
-
-        # Способ 3 (последний fallback): общий список команды
-        data = await self._get(f"/teams/{team_id}")
-        if not data or not isinstance(data, dict): return []
-        players = data.get("players") or []
-        names = [p["name"] for p in players if p.get("name")]
-        return names[:5] if names else []
-
-    async def _get_tournament_roster(self, tournament_id: int, team_id: int) -> list[str]:
-        """/tournaments/{id}/rosters — официальный эндпоинт ожидаемых составов."""
-        data = await self._get(f"/tournaments/{tournament_id}/rosters")
-        if not data or not isinstance(data, list): return []
-        for entry in data:
-            team = entry.get("team", {})
-            if team.get("id") != team_id:
-                continue
-            players = entry.get("players") or []
-            names = [p["name"] for p in players if p.get("name")]
-            if names: return names[:5]
-        return []
-
-    async def _get_roster_from_last_game(self, team_id: int) -> list[str]:
-        """
-        Берёт игроков из реального game-объекта последней сыгранной карты.
-        В CS2 players[] на уровне игры содержит тех, кто физически играл —
-        это надёжнее чем команда вообще, т.к. отражает текущий состав.
-        """
-        recent = await self._get(f"/teams/{team_id}/matches", {
-            "filter[videogame]": "cs-go",
-            "sort": "-scheduled_at", "per_page": 3,
-            "filter[status]": "finished",
-        })
-        if not recent: return []
-
-        for m in recent:
-            games = m.get("games") or []
-            for g in games:
-                game_id = g.get("id")
-                if not game_id: continue
-                game_data = await self._get(f"/csgo/games/{game_id}")
-                if not game_data or not isinstance(game_data, dict): continue
-
-                # Игроки лежат в players[] на уровне игры, у каждого team_id
-                all_players = game_data.get("players") or []
-                team_players = [
-                    p for p in all_players
-                    if (p.get("team", {}) or {}).get("id") == team_id
-                ]
-                names = [p["name"] for p in team_players if p.get("name")]
-                if names: return list(dict.fromkeys(names))[:5]  # убираем дубли, сохраняя порядок
-        return []
-
-    async def get_both_rosters(self, team1_id, team2_id, tournament_id: int | None = None) -> tuple[list[str], list[str]]:
-        """Оба состава параллельно, привязаны к турниру если он известен."""
-        r1, r2 = await asyncio.gather(
-            self.get_team_players(team1_id, tournament_id),
-            self.get_team_players(team2_id, tournament_id),
-        )
-        return r1, r2
-
-    # ── СТАТИСТИКА КОМАНДЫ ──────────────────────────────────────────
-    async def get_team_stats(self, team_id, team_name) -> dict:
-        """
-        Берём последние 7 матчей.
-        Вычисляем ВЗВЕШЕННЫЙ winrate: последний матч весит 1.0,
-        самый старый — 0.4. Свежая форма важнее.
-        """
-        base = {
-            "name": team_name, "id": team_id,
-            "winrate": None,
-            "weighted_winrate": None,   # главный показатель — взвешенный
-            "form": None,
-            "maps_played": None,
-            "avg_round_diff": None,
-            "recent_matches": [],       # детали для Groq
-            "_estimated": False,
-        }
-        if not team_id:
-            base["_estimated"] = True; return base
-
-        data = await self._get(f"/teams/{team_id}/matches", {
-            "filter[videogame]": "cs-go",
-            "sort": "-scheduled_at", "per_page": 7,   # только 7 последних
-            "filter[status]": "finished",
-        })
-        if not data:
-            base["_estimated"] = True; return base
-
-        # Убывающие веса: самый свежий матч = 1.0, самый старый = 0.4
-        WEIGHTS = [1.0, 0.85, 0.7, 0.6, 0.5, 0.45, 0.4]
-
-        weighted_score = 0.0
-        total_weight = 0.0
-        wins = losses = 0
-        form = ""
-        round_diffs = []
-        maps_played = 0
-        recent = []
-
-        for i, m in enumerate(data):
-            w_id = (m.get("winner") or {}).get("id")
-            if w_id is None: continue
-            won = (w_id == team_id)
-            w = WEIGHTS[i] if i < len(WEIGHTS) else 0.35
-
-            wins += won; losses += (not won)
-            weighted_score += w * (1 if won else 0)
-            total_weight += w
-            if len(form) < 7: form += ("W" if won else "L")
-
-            # Opponent name for context
-            opps = m.get("opponents") or []
-            opp_name = ""
-            for o in opps:
-                n = o.get("opponent", {}).get("name", "")
-                if n and n.lower() != team_name.lower():
-                    opp_name = n; break
-
-            recent.append({
-                "result": "W" if won else "L",
-                "opponent": opp_name,
-                "weight": round(w, 2),
-            })
-
-            for game in (m.get("games") or []):
-                maps_played += 1
-                res = game.get("results") or []
-                scores = {r["team"]["id"]: r["score"] for r in res
-                          if r.get("team") and r.get("score") is not None}
-                if len(scores) == 2:
-                    s_us = scores.get(team_id, 0)
-                    s_them = next((v for k,v in scores.items() if k != team_id), 0)
-                    round_diffs.append((s_us - s_them, w))  # сохраняем вес матча
-
-        total = wins + losses
-        if total == 0: base["_estimated"] = True; return base
-
-        base["winrate"] = round(wins / total * 100, 1)
-        if total_weight > 0:
-            base["weighted_winrate"] = round(weighted_score / total_weight * 100, 1)
-        base["form"] = form or "???????"
-        base["maps_played"] = maps_played
-        base["recent_matches"] = recent
-
-        # Взвешенная разница раундов — те же веса что и winrate
-        if round_diffs:
-            num = sum(diff * w for diff, w in round_diffs)
-            den = sum(w for _, w in round_diffs)
-            base["avg_round_diff"] = round(num / den, 1) if den > 0 else None
-        return base
-
-    # ── H2H ────────────────────────────────────────────────────────
-    async def get_h2h(self, team1_id, team2_id, team1_name, team2_name) -> dict:
-        result = {"team1_wins": 0, "team2_wins": 0, "total": 0, "last_matches": []}
-        if not team1_id or not team2_id: return result
-        data = await self._get("/csgo/matches", {
-            "filter[opponent_id]": f"{team1_id},{team2_id}",
-            "filter[status]": "finished",
-            "sort": "-scheduled_at", "per_page": 10,
-        })
-        for m in (data or []):
-            opp_ids = {o.get("opponent", {}).get("id") for o in m.get("opponents", [])}
-            if team1_id not in opp_ids or team2_id not in opp_ids: continue
-            w_id = (m.get("winner") or {}).get("id")
-            if w_id == team1_id: result["team1_wins"] += 1
-            elif w_id == team2_id: result["team2_wins"] += 1
-            result["total"] += 1
-            if len(result["last_matches"]) < 3:
-                try:
-                    sched = (m.get("scheduled_at") or "")[:10]
-                    ng = m.get("number_of_games", "?")
-                    result["last_matches"].append({
-                        "date": sched,
-                        "winner": team1_name if w_id == team1_id else team2_name,
-                        "format": f"BO{ng}",
-                    })
-                except: pass
-        return result
-
-    # ── ТОП КОМАНДЫ ────────────────────────────────────────────────
-    async def get_top_teams(self, limit=20) -> list[dict]:
-        # Актуальный рейтинг HLTV июнь 2026 (Valve ranking + HLTV)
-        HLTV_TOP = [
-            {"rank":1,  "name":"Team Vitality",    "flag":"🇫🇷"},
-            {"rank":2,  "name":"Team Spirit",       "flag":"🇷🇺"},
-            {"rank":3,  "name":"Team Falcons",      "flag":"🇸🇦"},
-            {"rank":4,  "name":"Natus Vincere",     "flag":"🇺🇦"},
-            {"rank":5,  "name":"BetBoom Team",      "flag":"🇷🇺"},
-            {"rank":6,  "name":"FURIA",             "flag":"🇧🇷"},
-            {"rank":7,  "name":"The MongolZ",       "flag":"🇲🇳"},
-            {"rank":8,  "name":"9z Team",           "flag":"🇦🇷"},
-            {"rank":9,  "name":"Aurora Gaming",     "flag":"🌍"},
-            {"rank":10, "name":"MOUZ",              "flag":"🇩🇪"},
-            {"rank":11, "name":"G2 Esports",        "flag":"🇪🇸"},
-            {"rank":12, "name":"Team Liquid",       "flag":"🇺🇸"},
-            {"rank":13, "name":"Heroic",            "flag":"🇩🇰"},
-            {"rank":14, "name":"Virtus.pro",        "flag":"🇷🇺"},
-            {"rank":15, "name":"FaZe Clan",         "flag":"🌍"},
-            {"rank":16, "name":"Astralis",          "flag":"🇩🇰"},
-            {"rank":17, "name":"ENCE",              "flag":"🇫🇮"},
-            {"rank":18, "name":"Cloud9",            "flag":"🇺🇸"},
-            {"rank":19, "name":"MIBR",              "flag":"🇧🇷"},
-            {"rank":20, "name":"paiN Gaming",       "flag":"🇧🇷"},
+            for i, m in enumerate(matches)
         ]
-        return HLTV_TOP[:limit]
+        cache_set("matches", result)
+        return JSONResponse(result)
+    except Exception as e:
+        logger.error(f"api_matches: {e}", exc_info=True)
+        raise HTTPException(500, "Ошибка загрузки матчей")
 
-    async def inject_ranks(self, matches): return matches
+# ── API: Analysis ─────────────────────────────────────────────────────
+@app.get("/api/analysis/{match_idx}")
+async def api_analysis(match_idx: int):
+    cache_key = f"analysis_{match_idx}"
+    cached = cache_get(cache_key, ttl_min=15)
+    if cached:
+        return JSONResponse(cached)
+
+    # Берём матч из кэша
+    matches = cache_get("matches", ttl_min=10)
+    if not matches or match_idx >= len(matches):
+        raise HTTPException(404, "Матч не найден. Сначала загрузи список матчей.")
+
+    match = matches[match_idx]
+    try:
+        parser = HLTVParser(token=PANDASCORE_TOKEN)
+        analyzer = MatchAnalyzer(parser=parser)
+        t1n, t2n = match["team1"], match["team2"]
+
+        # Шаг 1: статистика, H2H, реальные составы — параллельно
+        t1_stats, t2_stats, h2h, rosters = await asyncio.gather(
+            parser.get_team_stats(match.get("team1_id"), t1n),
+            parser.get_team_stats(match.get("team2_id"), t2n),
+            parser.get_h2h(match.get("team1_id"), match.get("team2_id"), t1n, t2n),
+            parser.get_both_rosters(match.get("team1_id"), match.get("team2_id"), match.get("tournament_id")),
+        )
+        t1_roster, t2_roster = rosters
+
+        # Шаг 2: МОДЕЛЬ считает проценты — единственный источник истины для цифр
+        base_pred = analyzer._calc_from_stats(t1_stats, t2_stats, h2h)
+        p1 = base_pred["team1_win_chance"]
+        p2 = base_pred["team2_win_chance"]
+
+        # Шаг 3: Groq получает готовые p1/p2 и пишет ТОЛЬКО текстовое объяснение
+        ai_result = None
+        if GROQ_API_KEY:
+            ai_result = await claude_analyze(
+                t1n, t2n, match.get("event", "CS2"),
+                t1_stats, t2_stats, h2h,
+                match.get("maps", "BO?"), GROQ_API_KEY,
+                p1=p1, p2=p2,
+                team1_roster=t1_roster,
+                team2_roster=t2_roster,
+            )
+
+        result = {
+            "team1": t1n, "team2": t2n,
+            "event": match.get("event", "CS2"),
+            "maps": match.get("maps", ""),
+            "p1": p1, "p2": p2,
+            "verdict": (ai_result or {}).get("verdict", ""),
+            "team1_stats": _fmt_stats(t1_stats),
+            "team2_stats": _fmt_stats(t2_stats),
+            "h2h": h2h,
+            "key_factors": (ai_result or {}).get("key_factors", base_pred.get("key_factors", [])),
+            "summary": (ai_result or {}).get("summary", ""),
+            "key_maps": (ai_result or {}).get("key_maps", ""),
+            "team1_players": (ai_result or {}).get("team1_players", []),
+            "team2_players": (ai_result or {}).get("team2_players", []),
+            "team1_roster_raw": t1_roster,
+            "team2_roster_raw": t2_roster,
+        }
+        cache_set(cache_key, result)
+        return JSONResponse(result)
+    except Exception as e:
+        logger.error(f"api_analysis: {e}", exc_info=True)
+        raise HTTPException(500, str(e))
+
+def _fmt_stats(s: dict) -> dict:
+    return {
+        "winrate": s.get("winrate"),
+        "winrate_last5": s.get("winrate_last5"),
+        "weighted_winrate": s.get("weighted_winrate"),
+        "form": s.get("form"),
+        "avg_round_diff": s.get("avg_round_diff"),
+        "maps_played": s.get("maps_played"),
+    }
+
+# ── API: Top Teams ────────────────────────────────────────────────────
+@app.get("/api/top-teams")
+async def api_top_teams():
+    cached = cache_get("top_teams", ttl_min=60)
+    if cached:
+        return JSONResponse(cached)
+    try:
+        parser = HLTVParser(token=PANDASCORE_TOKEN)
+        teams = await parser.get_top_teams(20)
+        cache_set("top_teams", teams)
+        return JSONResponse(teams)
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+# ── API: Subscription ─────────────────────────────────────────────────
+@app.get("/api/subscription/{user_id}")
+async def api_check_sub(user_id: int):
+    return JSONResponse(check_subscription(user_id))
+
+class ActivateBody(BaseModel):
+    user_id: int
+    code: str
+
+@app.post("/api/activate")
+async def api_activate(body: ActivateBody):
+    result = activate_code(body.user_id, body.code)
+    return JSONResponse(result)
+
+# ── RUN ───────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")

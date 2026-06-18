@@ -1,162 +1,170 @@
 """
-CS2 Match Prediction Model v4.0 — "Числа от модели, текст от AI"
+Groq API — ТОЛЬКО текстовый анализ.
+Проценты считает analyzer.py — Groq их даже не видит, чтобы не было соблазна
+подгонять текст под несуществующие у себя цифры.
 
-Принцип: Groq НЕ участвует в расчёте процентов. Только наша математика.
-Groq используется исключительно для текстового анализа (verdict, факторы, составы).
-
-Веса (после ревизии по итогам Cologne Major апсетов):
-  Взвешенная форма (7 матчей)     50%  — последний матч весит вдвое больше старого
-  Взвешенная разница раундов      25%  — те же веса, качество побед
-  HLTV/Valve Points (якорь)       15%  — не даёт топ-команде стать 50/50 против нонейма
-  H2H встречи                     10%  — только если ≥3 встреч
-
-Диапазон вывода: [34%, 72%] — CS2 слишком волатилен для экстремальных чисел.
+Принимает уже готовый p1/p2 от модели и объясняет ПОЧЕМУ именно такой расклад,
+опираясь на реальные составы (из PandaScore) и контекст турнира.
 """
-import math
+import aiohttp
+import json
 import logging
-from hltv_parser import HLTVParser
 
 logger = logging.getLogger(__name__)
 
-# Valve/HLTV ranking points (июнь 2026)
-HLTV_POINTS: dict[str, int] = {
-    "team vitality": 2000, "vitality": 2000,
-    "team spirit": 1998,   "spirit": 1998,
-    "team falcons": 1200,  "falcons": 1200,
-    "natus vincere": 900,  "navi": 900,
-    "betboom team": 750,   "betboom": 750,
-    "furia": 680,          "furia esports": 680,
-    "the mongolz": 620,    "mongolz": 620,
-    "9z team": 580,        "9z": 580,
-    "aurora gaming": 520,  "aurora": 520,
-    "mouz": 500,           "mousesports": 500,
-    "g2 esports": 480,     "g2": 480,
-    "team liquid": 450,    "liquid": 450,
-    "heroic": 420,
-    "virtus.pro": 400,     "vp": 400,
-    "faze clan": 380,      "faze": 380,
-    "astralis": 360,
-    "ence": 320,
-    "cloud9": 300,
-    "mibr": 280,
-    "pain gaming": 260,    "pain": 260,
-    "nrg": 240,            "nrg esports": 240,
-    "big": 220,            "big clan": 220,
-    "eternal fire": 200,
-    "3dmax": 190,
-    "gaimin gladiators": 175, "gaimin": 175,
-    "sinners": 160,
-    "legacy": 150,
-    "b8 esports": 130,     "b8": 130,
-    "parivision": 120,
-    "fut esports": 110,    "fut": 110,
-    "monte": 100,
-    "flyquest": 95,
-    "m80": 85,
-    "sharks": 75,
-    "tyloo": 70,
-    "lynn vision": 65,
-}
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+MODEL = "llama-3.3-70b-versatile"
+
+MAP_POOL = "Mirage, Inferno, Nuke, Ancient, Anubis, Dust2, Overpass"
+BANNED_MAPS = "Train, Vertigo, Cache, Cobblestone"
+
+COLOGNE_CONTEXT = """
+IEM COLOGNE MAJOR 2026 — КОНТЕКСТ (15 июня 2026):
+Прошли в плей-офф: Spirit 3-0, FURIA 3-0, Falcons 3-1, BetBoom 3-1
+Финал: Falcons vs Vitality
+Сенсации: 9z (#35) обыграли Vitality (#1); BetBoom обыграли и Falcons и Vitality
+Valve Ranking: #1 Vitality (apEX, ropz, ZywOo, flameZ, mezii), #2 Spirit (sh1ro, magixx, tN1R, zont1x, donk)
+"""
 
 
-def _sigmoid(x: float) -> float:
-    return 1.0 / (1.0 + math.exp(-x))
+async def claude_analyze(
+    team1: str, team2: str, event: str,
+    t1_stats: dict, t2_stats: dict,
+    h2h: dict, maps_format: str,
+    api_key: str,
+    p1: float, p2: float,  # ГОТОВЫЕ проценты от модели — Groq их объясняет, не придумывает
+    team1_roster: list[str] | None = None,
+    team2_roster: list[str] | None = None,
+) -> dict:
 
+    h2h_str = "нет данных"
+    if h2h and h2h.get("total", 0) > 0:
+        lm = h2h.get("last_matches", [])
+        lm_str = ", ".join(f"{x['date']} {x['format']}→{x['winner']}" for x in lm)
+        h2h_str = f"{team1}: {h2h['team1_wins']}п, {team2}: {h2h['team2_wins']}п. Последние: {lm_str}"
 
-def _get_pts(name: str) -> int | None:
-    key = name.lower().strip()
-    if key in HLTV_POINTS: return HLTV_POINTS[key]
-    for k, v in HLTV_POINTS.items():
-        if k in key or key in k: return v
-    return None
+    def fmt(t):
+        parts = []
+        if t.get("weighted_winrate") is not None:
+            parts.append(f"взвешенная форма (7 матчей)={t['weighted_winrate']:.0f}%")
+        if t.get("form"): parts.append(f"результаты={t['form']}")
+        if t.get("avg_round_diff") is not None:
+            s = "+" if t["avg_round_diff"] > 0 else ""
+            parts.append(f"avg_раунды={s}{t['avg_round_diff']:.1f}")
+        recent = t.get("recent_matches") or []
+        if recent:
+            rm = "; ".join(f"{m['result']} vs {m['opponent']}" for m in recent[:4])
+            parts.append(f"последние матчи: {rm}")
+        return ", ".join(parts) or "нет данных"
 
+    def roster_block(name, roster):
+        if not roster: return f"{name}: состав неизвестен"
+        # Жёсткий кап на 5 — это основа, не более. Если пришло больше,
+        # значит фильтрация на уровне API не сработала и затесались резервисты.
+        active_five = roster[:5]
+        return f"{name} (АКТИВНЫЙ состав, только основа — PandaScore): {', '.join(active_five)}"
 
-class MatchAnalyzer:
-    def __init__(self, parser: HLTVParser):
-        self.parser = parser
+    r1_block = roster_block(team1, team1_roster)
+    r2_block = roster_block(team2, team2_roster)
+    winner_name = team1 if p1 >= p2 else team2
+    winner_pct = max(p1, p2)
 
-    def _calc_from_stats(self, t1: dict, t2: dict, h2h: dict) -> dict:
-        return self._calculate(t1, t2, h2h)
+    prompt = f"""Ты эксперт-аналитик CS2. ПРОЦЕНТЫ УЖЕ ПОСЧИТАНЫ нашей моделью — твоя задача ОБЪЯСНИТЬ их, а не придумать свои.
 
-    def _calculate(self, t1: dict, t2: dict, h2h: dict) -> dict:
-        """
-        Считает финальный процент ИСКЛЮЧИТЕЛЬНО из объективных данных.
-        Groq сюда не вмешивается — только эта математика.
-        """
-        t1n, t2n = t1["name"], t2["name"]
-        logit = 0.0
-        factors = []
-        data_count = 0
+{COLOGNE_CONTEXT}
 
-        # ── 1. Взвешенная форма за 7 матчей (50%) — главный сигнал ──
-        ww1 = t1.get("weighted_winrate")
-        ww2 = t2.get("weighted_winrate")
-        if ww1 is not None and ww2 is not None:
-            diff = (ww1 - ww2) / 22.0   # 22pp разницы = 1 логит-юнит
-            logit += diff * 5.0          # вес 50%
-            data_count += 1
-            if abs(ww1 - ww2) >= 15:
-                b = t1n if ww1 > ww2 else t2n
-                factors.append(f"📈 {b} в лучшей форме последних матчей: {max(ww1,ww2):.0f}% vs {min(ww1,ww2):.0f}%")
-        else:
-            # fallback на обычный winrate если взвешенного нет
-            w1, w2 = t1.get("winrate"), t2.get("winrate")
-            if w1 is not None and w2 is not None:
-                diff = (w1 - w2) / 25.0
-                logit += diff * 3.0
-                data_count += 1
+━━━ МАТЧ ━━━
+{team1} vs {team2}
+Турнир: {event} | Формат: {maps_format}
 
-        # ── 2. Взвешенная разница раундов (25%) ──────────────────────
-        rd1 = t1.get("avg_round_diff")
-        rd2 = t2.get("avg_round_diff")
-        if rd1 is not None and rd2 is not None:
-            diff = (rd1 - rd2) / 5.0
-            logit += diff * 2.0           # вес 25%
-            data_count += 1
-            if abs(rd1 - rd2) >= 3:
-                b = t1n if rd1 > rd2 else t2n
-                s1 = "+" if rd1 > 0 else ""
-                s2 = "+" if rd2 > 0 else ""
-                factors.append(f"🎯 {b} доминирует на раундах ({s1}{rd1:.1f} vs {s2}{rd2:.1f} в среднем)")
+━━━ ГОТОВЫЙ ПРОГНОЗ МОДЕЛИ (не меняй эти числа!) ━━━
+{team1}: {p1}%
+{team2}: {p2}%
+Фаворит по модели: {winner_name} ({winner_pct:.0f}%)
 
-        # ── 3. HLTV Points — якорь, не главный фактор (15%) ──────────
-        pts1 = _get_pts(t1n)
-        pts2 = _get_pts(t2n)
-        if pts1 and pts2:
-            log_ratio = math.log(pts1 / pts2)
-            logit += log_ratio * 0.55     # вес 15%
-            data_count += 1
-            gap = abs(pts1 - pts2)
-            if gap > 400:
-                b = t1n if pts1 > pts2 else t2n
-                factors.append(f"📊 {b} выше в рейтинге ({max(pts1,pts2)} vs {min(pts1,pts2)} pts)")
+━━━ СОСТАВЫ (PandaScore, реальное время) ━━━
+{r1_block}
+{r2_block}
 
-        # ── 4. H2H — только при достаточной выборке (10%) ────────────
-        h_total = (h2h or {}).get("total", 0)
-        if h2h and h_total >= 3:
-            hw1 = h2h.get("team1_wins", 0)
-            hw2 = h2h.get("team2_wins", 0)
-            th = hw1 + hw2 or 1
-            if hw1 != hw2:
-                ratio = hw1 / th
-                logit += (ratio - 0.5) * 2.0   # вес 10%
-                data_count += 1
-                b = t1n if hw1 > hw2 else t2n
-                factors.append(f"🤝 H2H: {b} ведёт {max(hw1,hw2)}-{min(hw1,hw2)}")
+━━━ ДАННЫЕ ЗА ПОСЛЕДНИЕ МАТЧИ ━━━
+{team1}: {fmt(t1_stats)}
+{team2}: {fmt(t2_stats)}
+H2H: {h2h_str}
 
-        # ── Итог ────────────────────────────────────────────────────
-        if data_count == 0:
-            p1 = 50.0
-            factors.append("⚠️ Недостаточно данных — равный прогноз")
-        else:
-            raw = _sigmoid(logit) * 100
-            p1 = round(min(max(raw, 34.0), 72.0), 1)
+━━━ ПУЛ КАРТ ━━━
+Актуальные: {MAP_POOL}
+НЕ упоминать: {BANNED_MAPS}
 
-        p2 = round(100 - p1, 1)
+━━━ ЗАДАЧА ━━━
+1. Объясни ПОЧЕМУ модель дала именно такой процент {winner_name} ({winner_pct:.0f}%) — используй реальные данные выше
+2. НЕ предлагай свои проценты — используй ТОЛЬКО {p1}% и {p2}% что даны
+3. Составы — ТОЛЬКО из списков выше, не выдумывай игроков
+4. РОВНО 5 игроков в каждой команде (основной состав), НЕ больше — даже если в списке выше случайно оказалось больше имён, выбери 5 самых вероятных стартовых
+5. Дай рейтинг каждому игроку (HLTV Rating 2.0: ~1.0 средний, ~1.2 хороший, ~1.35+ топ)
+6. Карты — только из актуального пула
+7. Всё строго на русском
 
-        return {
-            "team1_win_chance": p1,
-            "team2_win_chance": p2,
-            "key_factors": factors[:4],
-            "data_points_used": data_count,  # для отладки/прозрачности
-        }
+Ответь ТОЛЬКО валидным JSON без markdown:
+{{"verdict": "<1 строка — почему {winner_name} фаворит, с конкретным фактом>", "team1_players": [{{"name": "<ник из списка>", "role": "<роль>", "rating": <0.85-1.5>, "form": "<горячая/хорошая/средняя/слабая>", "note": "<факт>"}}], "team2_players": [{{"name": "<ник из списка>", "role": "<роль>", "rating": <0.85-1.5>, "form": "<горячая/хорошая/средняя/слабая>", "note": "<факт>"}}], "key_maps": "{team1} силён: [карты]; {team2} силён: [карты]", "key_factors": ["<факт1>", "<факт2>", "<факт3>"], "summary": "<2 предложения объясняющих расклад {p1}/{p2}>"}}"""
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                GROQ_URL,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.15,
+                    "max_tokens": 1600,
+                    "response_format": {"type": "json_object"},
+                },
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 429:
+                    logger.warning("Groq 429"); return None
+                if resp.status != 200:
+                    txt = await resp.text()
+                    logger.error(f"Groq {resp.status}: {txt[:300]}")
+                    return None
+                data = await resp.json()
+                text = data["choices"][0]["message"]["content"].strip()
+                result = json.loads(text)
+
+                # Фильтр выдуманных имён
+                valid1 = {n.lower() for n in (team1_roster or [])}
+                valid2 = {n.lower() for n in (team2_roster or [])}
+                bad = {"неизвестен","unknown","tbd","?","игрок","player","n/a","name"}
+
+                if valid1:
+                    result["team1_players"] = [
+                        p for p in result.get("team1_players", [])
+                        if p.get("name","").lower().strip() not in bad
+                        and (p.get("name","").lower() in valid1
+                             or any(v in p.get("name","").lower() for v in valid1))
+                    ]
+                if valid2:
+                    result["team2_players"] = [
+                        p for p in result.get("team2_players", [])
+                        if p.get("name","").lower().strip() not in bad
+                        and (p.get("name","").lower() in valid2
+                             or any(v in p.get("name","").lower() for v in valid2))
+                    ]
+
+                # Финальный жёсткий кап: ровно 5 игроков максимум на команду,
+                # даже если фильтрация выше пропустила больше (например, дубли).
+                for key in ("team1_players", "team2_players"):
+                    players = result.get(key, [])
+                    if len(players) > 5:
+                        players = sorted(players, key=lambda p: p.get("rating") or 0, reverse=True)[:5]
+                    result[key] = players
+
+                # ВАЖНО: гарантируем что проценты не изменились
+                result["team1_win_pct"] = p1
+                result["team2_win_pct"] = p2
+                return result
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Groq JSON ошибка: {e}"); return None
+    except Exception as e:
+        logger.error(f"Groq ошибка: {e}"); return None
