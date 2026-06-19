@@ -105,7 +105,16 @@ async def lifespan(app: FastAPI):
 
 # ── FASTAPI APP ───────────────────────────────────────────────────────
 app = FastAPI(lifespan=lifespan)
-app.mount("/static", StaticFiles(directory="static"), name="static")
+
+_static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+if os.path.isdir(_static_dir):
+    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+    logger.info(f"Папка static найдена: {_static_dir}")
+else:
+    logger.error(
+        f"⚠️ Папка static НЕ НАЙДЕНА по пути {_static_dir}. "
+        "Mini App не будет работать — проверь что static/index.html залит в репозиторий."
+    )
 
 # ── HEALTH CHECK (Railway) ─────────────────────────────────────────
 @app.get("/health")
