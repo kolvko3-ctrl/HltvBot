@@ -42,9 +42,15 @@ def cache_set(key: str, data):
 
 # ── BOT HANDLERS ─────────────────────────────────────────────────────
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = WEBAPP_URL or "https://example.com"
+    if not WEBAPP_URL:
+        logger.error("WEBAPP_URL не задан! Кнопка Mini App не будет работать.")
+        await update.message.reply_text(
+            "⚠️ Бот настроен неправильно: не задан WEBAPP_URL.\n"
+            "Администратору нужно добавить эту переменную в Railway."
+        )
+        return
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🎮 Открыть CS2 Predictor", web_app=WebAppInfo(url=url))
+        InlineKeyboardButton("🎮 Открыть CS2 Predictor", web_app=WebAppInfo(url=WEBAPP_URL))
     ]])
     await update.message.reply_text(
         "👋 *CS2 Match Predictor*\n\n"
@@ -67,6 +73,13 @@ _bot_app: Application | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _bot_app
+    logger.info("=" * 50)
+    logger.info("ЗАПУСК main.py (Mini App / FastAPI режим)")
+    logger.info(f"BOT_TOKEN задан: {bool(BOT_TOKEN)}")
+    logger.info(f"WEBAPP_URL: {WEBAPP_URL or '⚠️ НЕ ЗАДАН — кнопка не появится!'}")
+    logger.info(f"PANDASCORE_TOKEN задан: {bool(PANDASCORE_TOKEN)}")
+    logger.info(f"GROQ_API_KEY задан: {bool(GROQ_API_KEY)}")
+    logger.info("=" * 50)
     if BOT_TOKEN:
         _bot_app = Application.builder().token(BOT_TOKEN).build()
         _bot_app.add_handler(CommandHandler("start", start_handler))
@@ -74,13 +87,14 @@ async def lifespan(app: FastAPI):
         await _bot_app.initialize()
         await _bot_app.start()
         await _bot_app.updater.start_polling(drop_pending_updates=True)
-        logger.info("Бот запущен")
+        logger.info("Бот запущен (polling активен)")
         # Устанавливаем кнопку меню
         if WEBAPP_URL:
             try:
                 await _bot_app.bot.set_chat_menu_button(
                     menu_button=MenuButtonWebApp(text="🎮 Открыть", web_app=WebAppInfo(url=WEBAPP_URL))
                 )
+                logger.info("Кнопка меню (синяя, слева от поля ввода) установлена")
             except Exception as e:
                 logger.warning(f"Не удалось установить кнопку меню: {e}")
     yield
