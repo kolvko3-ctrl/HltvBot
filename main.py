@@ -177,21 +177,20 @@ async def api_analysis(match_idx: int):
         analyzer = MatchAnalyzer(parser=parser)
         t1n, t2n = match["team1"], match["team2"]
 
-        # Шаг 1: статистика, H2H, реальные составы — параллельно
-        t1_stats, t2_stats, h2h, rosters = await asyncio.gather(
+        # Шаг 1: статистика и H2H — параллельно (составы больше не запрашиваем,
+        # PandaScore давал слишком неточные/устаревшие ростеры)
+        t1_stats, t2_stats, h2h = await asyncio.gather(
             parser.get_team_stats(match.get("team1_id"), t1n),
             parser.get_team_stats(match.get("team2_id"), t2n),
             parser.get_h2h(match.get("team1_id"), match.get("team2_id"), t1n, t2n),
-            parser.get_both_rosters(match.get("team1_id"), match.get("team2_id"), match.get("tournament_id")),
         )
-        t1_roster, t2_roster = rosters
 
         # Шаг 2: МОДЕЛЬ считает проценты — единственный источник истины для цифр
         base_pred = analyzer._calc_from_stats(t1_stats, t2_stats, h2h)
         p1 = base_pred["team1_win_chance"]
         p2 = base_pred["team2_win_chance"]
 
-        # Шаг 3: Groq получает готовые p1/p2 и пишет ТОЛЬКО текстовое объяснение
+        # Шаг 3: Groq получает готовые p1/p2 и пишет текстовое объяснение + карты
         ai_result = None
         if GROQ_API_KEY:
             ai_result = await claude_analyze(
@@ -199,8 +198,6 @@ async def api_analysis(match_idx: int):
                 t1_stats, t2_stats, h2h,
                 match.get("maps", "BO?"), GROQ_API_KEY,
                 p1=p1, p2=p2,
-                team1_roster=t1_roster,
-                team2_roster=t2_roster,
             )
 
         result = {
@@ -214,11 +211,7 @@ async def api_analysis(match_idx: int):
             "h2h": h2h,
             "key_factors": (ai_result or {}).get("key_factors", base_pred.get("key_factors", [])),
             "summary": (ai_result or {}).get("summary", ""),
-            "key_maps": (ai_result or {}).get("key_maps", ""),
-            "team1_players": (ai_result or {}).get("team1_players", []),
-            "team2_players": (ai_result or {}).get("team2_players", []),
-            "team1_roster_raw": t1_roster,
-            "team2_roster_raw": t2_roster,
+            "maps_analysis": (ai_result or {}).get("maps_analysis", []),
         }
         cache_set(cache_key, result)
         return JSONResponse(result)
