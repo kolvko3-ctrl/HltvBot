@@ -179,35 +179,25 @@ body {
 /* SUMMARY */
 .summary-box { margin:0 16px 12px; padding:12px 14px; background:var(--card); border:1px solid var(--border); border-radius:var(--radius); font-size:13px; line-height:1.5; color:var(--sub); font-style:italic; }
 
-/* PLAYERS */
-.player-card {
-  background:var(--card); border:1px solid var(--border);
-  border-radius:var(--radius); margin:6px 12px;
-  padding:12px 14px;
-  display:flex; align-items:flex-start; gap:12px;
-}
-.player-card.star { border-color:rgba(255,215,0,.3); background:rgba(255,215,0,.03); }
-.player-avatar { width:40px; height:40px; border-radius:10px; background:var(--card2); display:flex; align-items:center; justify-content:center; font-size:18px; flex-shrink:0; }
-.player-info { flex:1; min-width:0; }
-.player-name { font-size:15px; font-weight:700; display:flex; align-items:center; gap:6px; }
-.player-role { font-size:11px; color:var(--sub); margin-top:2px; }
-.player-stats { display:flex; gap:16px; margin-top:8px; flex-wrap:wrap; }
-.player-stat { display:flex; flex-direction:column; gap:2px; }
-.player-stat-val { font-size:14px; font-weight:700; }
-.player-stat-label { font-size:10px; color:var(--sub); }
-.player-note { font-size:12px; color:var(--sub); margin-top:8px; line-height:1.4; }
-.form-tag { font-size:10px; font-weight:700; padding:2px 6px; border-radius:4px; }
-.form-hot { background:rgba(255,107,53,.15); color:var(--accent); }
-.form-good { background:rgba(63,185,80,.12); color:var(--green); }
-.form-avg { background:rgba(88,166,255,.1); color:var(--blue); }
-.form-weak { background:rgba(139,148,158,.1); color:var(--sub); }
-
 /* MAPS SECTION */
 .maps-section { padding:0 12px 12px; }
 .map-item { padding:8px 14px; background:var(--card); border:1px solid var(--border); border-radius:8px; margin-bottom:6px; font-size:13px; line-height:1.4; }
 .map-item.green { border-left:3px solid var(--green); }
 .map-item.red { border-left:3px solid var(--red); }
 .map-item.gray { border-left:3px solid var(--border); }
+
+/* MAP PERCENTAGE CARDS */
+.map-pct-item { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); padding:12px 14px; margin-bottom:8px; }
+.map-pct-title { font-size:14px; font-weight:700; margin-bottom:8px; }
+.map-pct-row { display:flex; justify-content:space-between; align-items:center; }
+.map-pct-team { font-size:12px; color:var(--sub); font-weight:500; }
+.map-pct-team.win { color:var(--text); font-weight:700; }
+.map-pct-num { font-size:14px; font-weight:800; }
+.map-pct-num.t1 { color:var(--blue); }
+.map-pct-num.t2 { color:var(--accent); }
+.map-pct-bar-track { background:var(--card2); border-radius:6px; height:6px; overflow:hidden; margin-top:4px; }
+.map-pct-bar-fill { height:100%; border-radius:6px; transition:width .6s ease; }
+.map-pct-reason { font-size:12px; color:var(--sub); margin-top:8px; padding-top:8px; border-top:1px solid var(--border); line-height:1.4; }
 
 /* TOP TEAMS */
 .teams-list { padding:8px 12px 16px; }
@@ -705,27 +695,29 @@ function renderMapsAnalysis(maps, team1, team2) {
     return;
   }
 
-  const favoredColor = (favored) => {
-    if (favored === team1) return 'var(--blue)';
-    if (favored === team2) return 'var(--accent)';
-    return 'var(--sub)';
-  };
-  const favoredCls = (favored) => {
-    if (favored === team1) return 'green';
-    if (favored === team2) return 'red';
-    return 'gray';
-  };
-
-  el.innerHTML = `<div class="section-header">🗺 Карты</div>` +
-    maps.map(m => `
-      <div class="map-item ${favoredCls(m.favored)}">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
-          <span style="font-weight:700;font-size:13px">${esc(m.map)}</span>
-          <span style="font-size:11px;font-weight:700;color:${favoredColor(m.favored)}">${esc(m.favored || 'равно')}</span>
+  el.innerHTML = `<div class="section-header">🗺 Карты — шансы по каждой</div>` +
+    maps.map(m => {
+      const p1 = m.team1_pct ?? 50;
+      const p2 = m.team2_pct ?? 50;
+      const t1Wins = p1 >= p2;
+      return `
+      <div class="map-pct-item">
+        <div class="map-pct-title">${esc(m.map)}</div>
+        <div class="map-pct-row">
+          <span class="map-pct-team ${t1Wins ? 'win' : ''}">${esc(team1)}</span>
+          <span class="map-pct-num t1">${Math.round(p1)}%</span>
         </div>
-        <div style="color:var(--sub);font-size:12px;line-height:1.4">${esc(m.reason || '')}</div>
+        <div class="map-pct-bar-track">
+          <div class="map-pct-bar-fill" style="width:${p1}%;background:linear-gradient(90deg,var(--blue),var(--accent))"></div>
+        </div>
+        <div class="map-pct-row" style="margin-top:4px">
+          <span class="map-pct-team ${!t1Wins ? 'win' : ''}">${esc(team2)}</span>
+          <span class="map-pct-num t2">${Math.round(p2)}%</span>
+        </div>
+        ${m.reason ? `<div class="map-pct-reason">${esc(m.reason)}</div>` : ''}
       </div>
-    `).join('');
+    `;
+    }).join('');
 }
 
 function statRow(label, v1, v2, n1, n2, t1, t2) {
