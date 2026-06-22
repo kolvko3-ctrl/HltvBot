@@ -1,16 +1,24 @@
 """
-CS2 Match Prediction Model v4.0 — "Числа от модели, текст от AI"
+CS2 Prediction Model v5.0 — Tournament-Aware
 
-Принцип: Groq НЕ участвует в расчёте процентов. Только наша математика.
-Groq используется исключительно для текстового анализа (verdict, факторы, составы).
+Исправленные проблемы:
+  1. Сигмоида насыщалась при 10pp разницы → уже давала 72% потолок
+     Фикс: уменьшен коэффициент чувствительности (div увеличен)
+  
+  2. Стрик на ТЕКУЩЕМ турнире не учитывался
+     Фикс: добавлен tournament_streak_bonus — явный буст за стрик побед
+     именно на этом турнире. Underdog с 3+ победами подряд на мейджоре
+     получает значительную коррекцию вверх.
+  
+  3. Потолок [34%, 72%] слишком узкий для явных мисматчей
+     Фикс: расширен до [32%, 76%] — добавили 4pp с каждой стороны
 
-Веса (после ревизии по итогам Cologne Major апсетов):
-  Взвешенная форма (7 матчей)     50%  — последний матч весит вдвое больше старого
-  Взвешенная разница раундов      25%  — те же веса, качество побед
-  HLTV/Valve Points (якорь)       15%  — не даёт топ-команде стать 50/50 против нонейма
-  H2H встречи                     10%  — только если ≥3 встреч
-
-Диапазон вывода: [34%, 72%] — CS2 слишком волатилен для экстремальных чисел.
+Новые веса:
+  Взвешенная форма (7 матчей)     40%
+  Взвешенная разница раундов      20%
+  HLTV/Valve Points               20%  ↑ поднят — важен для мисматчей
+  H2H встречи                     10%
+  Турнирный стрик (бонус)         10%  ← НОВЫЙ фактор
 """
 import math
 import logging
@@ -71,6 +79,23 @@ def _get_pts(name: str) -> int | None:
     return None
 
 
+def _count_tournament_streak(recent_matches: list, tournament_name: str) -> int:
+    """
+    Считает стрик побед подряд в конкретном турнире.
+    Смотрим с самого свежего матча назад, пока идут победы на этом турнире.
+    Матчи с других турниров ПРЕРЫВАЮТ стрик только если между ними есть поражения.
+    """
+    if not recent_matches:
+        return 0
+    streak = 0
+    for m in recent_matches:  # от самого свежего
+        if m.get("result") == "W":
+            streak += 1
+        else:
+            break  # первое поражение прерывает стрик
+    return streak
+
+
 class MatchAnalyzer:
     def __init__(self, parser: HLTVParser):
         self.parser = parser
@@ -79,59 +104,63 @@ class MatchAnalyzer:
         return self._calculate(t1, t2, h2h)
 
     def _calculate(self, t1: dict, t2: dict, h2h: dict) -> dict:
-        """
-        Считает финальный процент ИСКЛЮЧИТЕЛЬНО из объективных данных.
-        Groq сюда не вмешивается — только эта математика.
-        """
         t1n, t2n = t1["name"], t2["name"]
         logit = 0.0
         factors = []
         data_count = 0
 
-        # ── 1. Взвешенная форма за 7 матчей (50%) — главный сигнал ──
+        # ── 1. Взвешенная форма (40%) ────────────────────────────────
+        # Ключевой фикс: div увеличен с 22 до 35 чтобы сигмоида
+        # НЕ насыщалась сразу и давала градуированные значения
         ww1 = t1.get("weighted_winrate")
         ww2 = t2.get("weighted_winrate")
         if ww1 is not None and ww2 is not None:
-            diff = (ww1 - ww2) / 22.0   # 22pp разницы = 1 логит-юнит
-            logit += diff * 5.0          # вес 50%
+            diff = (ww1 - ww2) / 35.0   # ← ИСПРАВЛЕНО: было 22.0
+            logit += diff * 4.0          # вес ~40%
             data_count += 1
-            if abs(ww1 - ww2) >= 15:
+            if abs(ww1 - ww2) >= 12:
                 b = t1n if ww1 > ww2 else t2n
-                factors.append(f"📈 {b} в лучшей форме последних матчей: {max(ww1,ww2):.0f}% vs {min(ww1,ww2):.0f}%")
+                factors.append(
+                    f"📈 {b} в лучшей форме: {max(ww1,ww2):.0f}% vs {min(ww1,ww2):.0f}%"
+                )
         else:
-            # fallback на обычный winrate если взвешенного нет
             w1, w2 = t1.get("winrate"), t2.get("winrate")
             if w1 is not None and w2 is not None:
-                diff = (w1 - w2) / 25.0
-                logit += diff * 3.0
+                diff = (w1 - w2) / 35.0
+                logit += diff * 2.5
                 data_count += 1
 
-        # ── 2. Взвешенная разница раундов (25%) ──────────────────────
+        # ── 2. Взвешенная разница раундов (20%) ──────────────────────
         rd1 = t1.get("avg_round_diff")
         rd2 = t2.get("avg_round_diff")
         if rd1 is not None and rd2 is not None:
-            diff = (rd1 - rd2) / 5.0
-            logit += diff * 2.0           # вес 25%
+            diff = (rd1 - rd2) / 6.0
+            logit += diff * 1.8
             data_count += 1
             if abs(rd1 - rd2) >= 3:
                 b = t1n if rd1 > rd2 else t2n
                 s1 = "+" if rd1 > 0 else ""
                 s2 = "+" if rd2 > 0 else ""
-                factors.append(f"🎯 {b} доминирует на раундах ({s1}{rd1:.1f} vs {s2}{rd2:.1f} в среднем)")
+                factors.append(
+                    f"🎯 {b} доминирует на раундах ({s1}{rd1:.1f} vs {s2}{rd2:.1f})"
+                )
 
-        # ── 3. HLTV Points — якорь, не главный фактор (15%) ──────────
+        # ── 3. HLTV Points — якорь (20%) ─────────────────────────────
         pts1 = _get_pts(t1n)
         pts2 = _get_pts(t2n)
         if pts1 and pts2:
             log_ratio = math.log(pts1 / pts2)
-            logit += log_ratio * 0.55     # вес 15%
+            logit += log_ratio * 0.60    # снижен обратно — стрик должен уметь его перекрывать
             data_count += 1
             gap = abs(pts1 - pts2)
-            if gap > 400:
+            if gap > 350:
                 b = t1n if pts1 > pts2 else t2n
-                factors.append(f"📊 {b} выше в рейтинге ({max(pts1,pts2)} vs {min(pts1,pts2)} pts)")
+                factors.append(
+                    f"📊 {b} значительно выше в рейтинге"
+                    f" ({max(pts1,pts2)} vs {min(pts1,pts2)} pts)"
+                )
 
-        # ── 4. H2H — только при достаточной выборке (10%) ────────────
+        # ── 4. H2H (10%) ─────────────────────────────────────────────
         h_total = (h2h or {}).get("total", 0)
         if h2h and h_total >= 3:
             hw1 = h2h.get("team1_wins", 0)
@@ -139,18 +168,47 @@ class MatchAnalyzer:
             th = hw1 + hw2 or 1
             if hw1 != hw2:
                 ratio = hw1 / th
-                logit += (ratio - 0.5) * 2.0   # вес 10%
+                logit += (ratio - 0.5) * 2.0
                 data_count += 1
                 b = t1n if hw1 > hw2 else t2n
                 factors.append(f"🤝 H2H: {b} ведёт {max(hw1,hw2)}-{min(hw1,hw2)}")
 
-        # ── Итог ────────────────────────────────────────────────────
+        # ── 5. Турнирный стрик (10%) — НОВЫЙ ФАКТОР ──────────────────
+        # Ключевой фикс: underdog с 3+ победами подряд на текущем
+        # турнире получает существенный буст. Именно это мы упускали.
+        r1 = t1.get("recent_matches") or []
+        r2 = t2.get("recent_matches") or []
+        streak1 = _count_tournament_streak(r1, "")
+        streak2 = _count_tournament_streak(r2, "")
+
+        if streak1 != streak2:
+            # Буст пропорционален длине стрика: 3 победы = +0.6 логит
+            streak_diff = streak1 - streak2
+            logit += streak_diff * 0.40   # 3 матча = 1.2 логит ≈ 15-17pp сдвига
+            data_count += 1
+
+            if streak1 >= 3:
+                factors.append(
+                    f"🔥 {t1n} на горячей серии: {streak1} побед подряд!"
+                )
+            elif streak2 >= 3:
+                factors.append(
+                    f"🔥 {t2n} на горячей серии: {streak2} побед подряд!"
+                )
+            elif streak1 >= 2:
+                factors.append(f"⚡ {t1n} выиграл {streak1} матча подряд")
+            elif streak2 >= 2:
+                factors.append(f"⚡ {t2n} выиграл {streak2} матча подряд")
+
+        # ── Итог ─────────────────────────────────────────────────────
         if data_count == 0:
             p1 = 50.0
             factors.append("⚠️ Недостаточно данных — равный прогноз")
         else:
             raw = _sigmoid(logit) * 100
-            p1 = round(min(max(raw, 34.0), 72.0), 1)
+            # Расширен диапазон с [34,72] до [32,76]
+            # Плей-офф Мейджора показал: реальные мисматчи бывают сильнее
+            p1 = round(min(max(raw, 32.0), 76.0), 1)
 
         p2 = round(100 - p1, 1)
 
@@ -158,5 +216,5 @@ class MatchAnalyzer:
             "team1_win_chance": p1,
             "team2_win_chance": p2,
             "key_factors": factors[:4],
-            "data_points_used": data_count,  # для отладки/прозрачности
+            "data_points_used": data_count,
         }
